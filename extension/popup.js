@@ -15,35 +15,10 @@ function showView(name) {
   const id =
     name === "success"
       ? "view-success"
-      : name === "diff"
-        ? "view-diff"
+      : name === "review"
+        ? "view-review"
         : "view-main";
   document.getElementById(id).classList.add("active");
-}
-
-function fillDiffModal(d) {
-  const sum = document.getElementById("diff-summary");
-  sum.textContent = (d && d.summary) || "Recipe improved with your new source.";
-  let list = Array.isArray(d.key_improvements) ? d.key_improvements : [];
-  if (!list.length) {
-    list = []
-      .concat(d.new_insights || [])
-      .concat((d.ingredient_changes || []).map((x) => "Ingredients: " + x))
-      .concat((d.step_changes || []).map((x) => "Steps: " + x));
-  }
-  const ul = document.getElementById("diff-key-improvements");
-  const wrap = document.getElementById("diff-key-wrap");
-  ul.innerHTML = "";
-  if (!list.length) {
-    wrap.style.display = "none";
-    return;
-  }
-  wrap.style.display = "block";
-  list.forEach((t) => {
-    const li = document.createElement("li");
-    li.textContent = String(t);
-    ul.appendChild(li);
-  });
 }
 
 function escapeHtml(s) {
@@ -77,6 +52,9 @@ async function fetchWithFallback(path, options) {
 
 let lastBase = null;
 let lastRecipeId = null;
+let pendingMergeRecipeId = null;
+let pendingSynthOk = false;
+let pendingSourceCountAfter = 1;
 let recentRecipes = [];
 let activeId = null;
 let activeTitle = "";
@@ -257,6 +235,70 @@ async function postToBackend(payload) {
   return { res: out.res, data };
 }
 
+async function postMergeDecision(recipeId, action) {
+  const out = await fetchWithFallback(
+    `/api/recipes/${encodeURIComponent(recipeId)}/merge-decision`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    }
+  );
+  lastBase = out.base;
+  const data = await out.res.json().catch(() => ({}));
+  return { res: out.res, data };
+}
+
+function fillReview(proposal, questions, synthOk) {
+  const d = proposal && proposal.diff ? proposal.diff : {};
+  document.getElementById("review-summary").textContent =
+    d.summary || "Review the proposed changes.";
+  const list = Array.isArray(d.key_improvements) ? d.key_improvements : [];
+  const ul = document.getElementById("review-key-improvements");
+  const wrap = document.getElementById("review-key-wrap");
+  ul.innerHTML = "";
+  if (!list.length) {
+    wrap.style.display = "none";
+  } else {
+    wrap.style.display = "block";
+    list.forEach((t) => {
+      const li = document.createElement("li");
+      li.textContent = String(t);
+      ul.appendChild(li);
+    });
+  }
+  const ss = proposal && proposal.sourceSummary ? proposal.sourceSummary : {};
+  document.getElementById("review-source").textContent = [
+    ss.source_url ? String(ss.source_url).slice(0, 80) : "",
+    ss.source_type ? ` · ${ss.source_type}` : "",
+    ss.confidence ? ` · confidence: ${ss.confidence}` : "",
+  ]
+    .filter(Boolean)
+    .join("") || "—";
+
+  const q = questions || {};
+  document.getElementById("review-q1").textContent = q.what_changed
+    ? `What changed: ${q.what_changed}`
+    : "";
+  document.getElementById("review-q2").textContent = q.better
+    ? `Better recipe? ${q.better}`
+    : "";
+  document.getElementById("review-q3").textContent = q.worth_keeping
+    ? `Worth keeping? ${q.worth_keeping}`
+    : "";
+
+  document.getElementById("review-title").textContent = synthOk
+    ? "Proposed recipe update"
+    : "Couldn’t merge — still save the page?";
+
+  const applyBtn = document.getElementById("btn-apply-merge");
+  applyBtn.disabled = !synthOk;
+  applyBtn.style.opacity = synthOk ? "1" : "0.45";
+  applyBtn.title = synthOk
+    ? ""
+    : "Apply needs a successful merge preview. Use Keep source or Discard.";
+}
+
 document.getElementById("btn-submit").addEventListener("click", async () => {
   const btn = document.getElementById("btn-submit");
   const target = getSelectedTarget();
@@ -327,6 +369,20 @@ document.getElementById("btn-submit").addEventListener("click", async () => {
     }
 
     lastRecipeId = data.recipeId;
+
+    if (target.mode === "merge" && data.reviewRequired) {
+      pendingMergeRecipeId = data.recipeId;
+      pendingSynthOk = Boolean(data.synthOk);
+      pendingSourceCountAfter =
+        data.sourceCountAfter != null ? data.sourceCountAfter : 1;
+      fillReview(data.proposal, data.questions, pendingSynthOk);
+      showView("review");
+      setStatus("", "info");
+      document.getElementById("status").className = "";
+      btn.disabled = false;
+      return;
+    }
+
     const title = data.title || "Recipe";
     const sourceCount = data.sourceCount || 1;
 
@@ -343,12 +399,7 @@ document.getElementById("btn-submit").addEventListener("click", async () => {
       target.mode === "merge"
         ? "Recipe updated with new source."
         : "New recipe created from this page.";
-    if (target.mode === "merge" && data.last_diff) {
-      fillDiffModal(data.last_diff);
-      showView("diff");
-    } else {
-      showView("success");
-    }
+    showView("success");
     setStatus("", "info");
     document.getElementById("status").className = "";
   } catch (e) {
@@ -377,8 +428,82 @@ document.getElementById("btn-add-another").addEventListener("click", async () =>
   await loadRecipesAndRender();
 });
 
-document.getElementById("btn-diff-continue").addEventListener("click", () => {
-  showView("success");
+async function runMergeDecision(action) {
+  const id = pendingMergeRecipeId;
+  if (!id) {
+    setStatus("Nothing to resolve.", "err");
+    return;
+  }
+  const applyBtn = document.getElementById("btn-apply-merge");
+  const keepBtn = document.getElementById("btn-keep-source");
+  const discBtn = document.getElementById("btn-discard-merge");
+  [applyBtn, keepBtn, discBtn].forEach((b) => {
+    if (b) b.disabled = true;
+  });
+  setStatus("Saving…", "info");
+
+  try {
+    const { res, data } = await postMergeDecision(id, action);
+    if (!res.ok || !data.ok) {
+      setStatus(data.error || "Request failed", "err");
+      [applyBtn, keepBtn, discBtn].forEach((b) => {
+        if (b) b.disabled = false;
+      });
+      return;
+    }
+
+    pendingMergeRecipeId = null;
+    const recipe = data.recipe;
+    const title =
+      (recipe && recipe.title) || activeTitle || "Recipe";
+    const sc =
+      data.sourceCount != null
+        ? data.sourceCount
+        : recipe && Array.isArray(recipe.sources)
+          ? recipe.sources.length
+          : 1;
+
+    await chrome.storage.local.set({
+      [STORAGE_ID]: id,
+      [STORAGE_TITLE]: title,
+      [STORAGE_COUNT]: sc,
+    });
+    activeId = id;
+    activeTitle = title;
+
+    document.getElementById("success-title").textContent =
+      action === "apply"
+        ? "Changes applied"
+        : action === "keep_source"
+          ? "Source saved"
+          : "Discarded";
+    document.getElementById("success-sub").textContent =
+      action === "apply"
+        ? "Recipe updated with the merged version. Open to review."
+        : action === "keep_source"
+          ? "New page is in your source list. Recipe body unchanged."
+          : "No changes. The new page was not added.";
+
+    showView("success");
+    setStatus("", "info");
+    document.getElementById("status").className = "";
+  } catch (e) {
+    console.error(e);
+    setStatus("Network error.", "err");
+  }
+  [applyBtn, keepBtn, discBtn].forEach((b) => {
+    if (b) b.disabled = false;
+  });
+}
+
+document.getElementById("btn-apply-merge").addEventListener("click", () => {
+  runMergeDecision("apply");
+});
+document.getElementById("btn-keep-source").addEventListener("click", () => {
+  runMergeDecision("keep_source");
+});
+document.getElementById("btn-discard-merge").addEventListener("click", () => {
+  runMergeDecision("discard");
 });
 
 loadRecipesAndRender();

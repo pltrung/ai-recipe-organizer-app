@@ -400,11 +400,13 @@ export default function CreatePage() {
         ← Recipe Cloud
       </Link>
       <h1 className="text-2xl font-semibold text-neutral-900">
-        Drop your recipe links or images
+        Start your recipe
       </h1>
-      <p className="mt-1 text-center text-sm text-neutral-500">
-        Paste URLs (blogs, YouTube, Instagram, TikTok, etc.) or upload
-        screenshots
+      <p className="mt-1 max-w-md text-center text-sm leading-relaxed text-neutral-500">
+        Add <strong>2–4 sources</strong> (blogs, YouTube, screenshots, etc.) for a
+        strong <strong>first version</strong> — not the final word. You’ll keep
+        refining from the <strong>recipe page</strong> and the{" "}
+        <strong>Chrome extension</strong> as you find better tips and sources.
       </p>
 
       <div className="mt-8 w-full max-w-lg space-y-6">

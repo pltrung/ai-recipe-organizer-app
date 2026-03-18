@@ -6,6 +6,8 @@ This document describes how the app works end-to-end, with emphasis on **four-ph
 
 ## 1. Product overview
 
+**Recipe Cloud** is an **evolving recipe workspace**, not a one-shot extractor: you start a solid first version (web or extension), then **refine** by adding sources from the extension while the **recipe page** stays the home base to cook from. See **`docs/RECIPE_WORKSPACE.md`** for the full mental model (strong vs weak sources, web vs extension roles).
+
 **Recipe Cloud** saves recipes by:
 
 - Pasting **one or more URLs** and/or **images** on **`/create`**.
@@ -54,20 +56,25 @@ Full re-synthesis uses **all** **`raw_texts[]`** (not incremental). Pipeline: **
 | Mode | Behavior |
 |------|----------|
 | **New** | Single source → phased synthesis (or weak draft / **`extractRecipe`** if disabled/short input). |
-| **Merge** | Append **`sources`/`raw_texts`** → **`WithExtractions`** → on success **replace** body + **`source_extractions`**; **`last_diff`** + **`versions`**. |
-| **Failure** | Append history only; **`needs_review: true`**; **do not** overwrite ingredients/steps/tips. |
+| **Merge** | Re-synthesize with **all existing + new** text → store **`pending_merge`** only; return **`reviewRequired`** + proposal. User chooses via **`POST /api/recipes/[id]/merge-decision`**. |
+| **Merge → Apply** | Commit proposed body + append **`sources`/`raw_texts`/`source_extractions`**; **`last_diff`** + **`versions`**. |
+| **Merge → Keep source** | Append **`sources`/`raw_texts`/`source_extractions`** only; body unchanged; **`versions`** note. |
+| **Merge → Discard** | Clear **`pending_merge`**; row unchanged. |
+| **Merge synth fail** | Still **`pending_merge`** + review; **Apply** disabled; **Keep** / **Discard** available. |
 
-### Recipe diff (merge success only)
+See **`docs/MERGE_REVIEW_FLOW.md`**.
+
+### Recipe diff (after user applies merge)
 
 | Step | What runs |
 |------|-----------|
-| 1 | **`previousRecipe`** = DB row before update. |
-| 2 | **`nextRecipe`** = synthesized payload. |
-| 3 | **`diffRecipes`** — structural diff (ingredients, steps, tips, etc.). |
-| 4 | **`summarizeRecipeDiffWithAi`** — **`summary`** + **≤5** **`key_improvements[]`** (material changes only). If AI returns nothing → **`heuristicDiffSummary`**. |
-| 5 | **`last_diff`**; **`versions[]`** prepend (cap **10**). |
+| 1 | **`previousRecipe`** = committed row before apply. |
+| 2 | **`nextRecipe`** = proposed payload (from **`pending_merge`**). |
+| 3 | **`diffRecipes`** + **`materialRecipeDiffStructured`**. |
+| 4 | **`summarizeRecipeDiffWithAi`** — decision-oriented **`summary`** + **3–5** **`key_improvements[]`**. |
+| 5 | On **Apply**: write **`last_diff`**; prepend **`versions[]`**. |
 
-**UI:** Extension post-merge screen; **`RecipeUpdatedModal`** (`?updated=`); recipe page **Recently improved** + **`lastDiff`**; expandable **versions** + source URLs.
+**UI:** Extension **review** screen (apply / keep / discard); **`RecipeUpdatedModal`** after apply; recipe page **Recently improved** + **`lastDiff`**.
 
 ---
 
@@ -259,7 +266,7 @@ Map **`SynthesisDbPayload`** → DB columns (**`aiMerge.ts`**).
 | **`mistakes`**, **`techniques`** | Legacy columns; **empty arrays** on new synthesis |
 | **`source_urls`**, **`source_platforms`**, **`raw_text`**, **`sources`**, **`raw_texts`**, **`source_extractions`** | Provenance + Phase A snapshot |
 | **`needs_user_input`**, **`needs_review`** | Draft / failed re-synth |
-| **`last_diff`**, **`versions`** | Merge UX + history |
+| **`last_diff`**, **`versions`**, **`pending_merge`** | Merge UX + optional pending proposal |
 
 Migrations: chain from **`create_recipes`** through **`recipe_last_diff`**; add **`source_extractions`** via **`20250325000000_source_extractions.sql`**.
 

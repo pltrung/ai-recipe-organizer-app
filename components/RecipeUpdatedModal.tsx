@@ -15,7 +15,7 @@ type Props = {
 
 function snapshotBullets(d: RecipeLastDiff): string[] {
   const k = d.key_improvements?.filter(Boolean) ?? [];
-  if (k.length) return k.slice(0, 4);
+  if (k.length) return k.slice(0, 5);
   return [
     ...(d.new_insights ?? []),
     ...(d.ingredient_changes ?? []).map((x) => String(x)),
@@ -156,12 +156,12 @@ export function RecipeUpdatedModal({
                   id="recipe-improved-title"
                   className="text-xl font-semibold tracking-tight text-neutral-900"
                 >
-                  Recipe Improved
+                  Recipe updated
                 </h2>
               </div>
               <p className="pl-[44px] text-[15px] leading-relaxed text-neutral-600">
                 {lastDiff.summary ||
-                  "Your recipe was refined using the new source."}
+                  "Your recipe absorbed the new source — see what shifted below."}
               </p>
             </header>
 
@@ -169,7 +169,7 @@ export function RecipeUpdatedModal({
             {snapshots.length > 0 && (
               <section className="space-y-3 rounded-xl border border-emerald-100/80 bg-gradient-to-b from-emerald-50/60 to-white px-4 py-4">
                 <p className="text-xs font-semibold uppercase tracking-wider text-emerald-800/90">
-                  Highlights
+                  What changed
                 </p>
                 <ul className="space-y-3">
                   {snapshots.map((line, i) => (

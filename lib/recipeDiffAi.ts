@@ -7,28 +7,33 @@ export type AiDiffResult = {
   key_improvements: string[];
 };
 
-const SYSTEM = `You compare BEFORE vs AFTER recipe updates (a new source was merged).
+const SYSTEM = `You help a cook DECIDE whether to apply a proposed recipe update (new source was added).
 
-Report ONLY changes that matter to a home cook:
-- An ingredient promoted to core or removed from core (authenticity)
-- A meaningful new substitution option
-- Major step changes: clearer order, critical timing, technique fix — NOT tiny wording edits
-- One genuinely useful new tip
+Write like a trusted editor — specific and decision-oriented.
 
-IGNORE:
-- Optional-ingredient tweaks that don't affect the dish identity
-- Rephrasing with same meaning
-- Mistakes/techniques sections (ignore if present)
+GOOD examples (tone + specificity):
+- "Mascarpone moves to core — stronger sources agree it defines the filling."
+- "New warning: don’t oversoak ladyfingers or the layer turns soggy."
+- "Filling step now emphasizes whipping to soft peaks for texture."
+- "Variant note: lighter home version can use whipped cream instead of full mascarpone layer."
 
-Return STRICT JSON only:
-{
-  "summary": string,
-  "key_improvements": string[]
-}
+BAD: generic "recipe improved", vague "better steps", trivial wording changes, repeating the same idea.
+
+Prioritize:
+- Core ↔ optional moves (authenticity)
+- Meaningful substitutions
+- Stronger cooking steps (technique, timing, order)
+- New warnings that prevent failure
+- Style / variant notes, important tips
+
+IGNORE: optional garnish noise, same-meaning rephrasing.
+
+Return STRICT JSON:
+{ "summary": string, "key_improvements": string[] }
 
 Rules:
-- summary: 1–3 sentences, max ~400 characters. If updates are minor, say so briefly.
-- key_improvements: 0–5 bullets only. Skip trivial items. Each bullet one concrete improvement.`;
+- summary: 2–4 sentences, max ~380 chars. State what materially changed and whether it’s a clear upgrade.
+- key_improvements: exactly 3–5 bullets OR fewer if only 1–2 real changes. No filler. Each bullet one concrete, attributable change.`;
 
 export async function summarizeRecipeDiffWithAi(
   prev: Recipe,
@@ -66,7 +71,7 @@ export async function summarizeRecipeDiffWithAi(
     const p = JSON.parse(raw) as Record<string, unknown>;
     const summary = String(p.summary ?? "").trim().slice(0, 500);
     let key_improvements = Array.isArray(p.key_improvements)
-      ? p.key_improvements.map((x) => String(x).trim()).filter(Boolean).slice(0, 6)
+      ? p.key_improvements.map((x) => String(x).trim()).filter(Boolean).slice(0, 5)
       : [];
     return {
       summary:

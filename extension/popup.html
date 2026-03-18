@@ -194,10 +194,12 @@
   <body>
     <div id="view-main" class="view active">
       <h1>🍳 Recipe Cloud</h1>
-      <p class="tagline">Recipe Builder — add this page to any recipe</p>
+      <p class="tagline">
+        Add this page to <strong>your</strong> recipe — tips, sources, better steps
+      </p>
       <p id="backend-hint" class="hint"></p>
 
-      <p class="section-title">Add this page to</p>
+      <p class="section-title">Add to which recipe?</p>
       <div id="choices-loading">Loading recipes…</div>
       <div id="choices" style="display: none"></div>
 
@@ -216,18 +218,28 @@
       <a href="#" id="open-options" class="settings">Extension settings (API URL)</a>
     </div>
 
-    <div id="view-diff" class="view">
-      <p class="success-title">Recipe updated</p>
-      <p class="diff-summary" id="diff-summary"></p>
-      <div class="diff-section" id="diff-key-wrap">
-        <h3 style="color: #166534">What improved</h3>
-        <p style="font-size: 11px; color: #737373; margin: 4px 0 8px">
-          Authenticity · technique · flavor
-        </p>
-        <ul id="diff-key-improvements"></ul>
+    <div id="view-review" class="view">
+      <p class="success-title" id="review-title">Review proposed update</p>
+      <p class="diff-summary" id="review-summary"></p>
+      <div class="diff-section" id="review-key-wrap">
+        <h3>What would change</h3>
+        <ul id="review-key-improvements"></ul>
       </div>
-      <button type="button" class="primary" id="btn-diff-continue" style="margin-top: 14px">
-        Continue
+      <div class="diff-section" style="margin-top: 10px">
+        <h3>Source</h3>
+        <p class="diff-summary" id="review-source" style="margin-top: 4px; font-size: 12px"></p>
+      </div>
+      <p class="diff-summary" id="review-q1" style="font-size: 12px; margin-top: 10px"></p>
+      <p class="diff-summary" id="review-q2" style="font-size: 12px"></p>
+      <p class="diff-summary" id="review-q3" style="font-size: 12px"></p>
+      <button type="button" class="primary" id="btn-apply-merge" style="margin-top: 14px">
+        Apply changes
+      </button>
+      <button type="button" class="secondary" id="btn-keep-source">
+        Keep source only
+      </button>
+      <button type="button" class="secondary" id="btn-discard-merge" style="color: #737373">
+        Discard
       </button>
     </div>
 

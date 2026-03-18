@@ -233,7 +233,7 @@ export function RecipeView({
           className="flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-200/80 bg-gradient-to-r from-emerald-50 to-white px-4 py-3.5 text-sm font-semibold text-emerald-900 shadow-sm transition hover:border-emerald-300 hover:shadow"
         >
           <span aria-hidden>✨</span>
-          Recently improved
+          What changed
         </button>
       )}
 
@@ -282,6 +282,10 @@ export function RecipeView({
             {nSources} source{nSources === 1 ? "" : "s"}
           </span>
         </div>
+        <p className="text-xs leading-relaxed text-neutral-500">
+          Your <strong>home base</strong> for this dish — ingredients, steps, and
+          notes improve as you add sources from the extension.
+        </p>
         {showQualityPills ? (
           <div className="flex flex-wrap gap-2 pt-1">
             {quality?.dish_taxonomy && quality.dish_taxonomy !== "other" ? (
@@ -318,6 +322,9 @@ export function RecipeView({
               <h2 className="text-xs font-bold uppercase tracking-wide text-blue-900">
                 Must know
               </h2>
+              <p className="mt-0.5 text-[11px] text-blue-900/65">
+                Texture, timing, authenticity — not fluff
+              </p>
               <ul className="mt-2 space-y-2 text-sm text-blue-950">
                 {quality.critical_tips.map((t, i) => (
                   <li key={i} className="leading-snug">
@@ -332,6 +339,9 @@ export function RecipeView({
               <h2 className="text-xs font-bold uppercase tracking-wide text-red-900">
                 Avoid
               </h2>
+              <p className="mt-0.5 text-[11px] text-red-900/65">
+                Common failures — worth reading once
+              </p>
               <ul className="mt-2 space-y-2 text-sm text-red-950">
                 {quality.avoid_mistakes.map((t, i) => (
                   <li key={i} className="leading-snug">
@@ -460,7 +470,7 @@ export function RecipeView({
                   Core ingredients
                 </h2>
                 <p className="mt-1 text-xs text-neutral-500">
-                  Essential for this dish
+                  What defines this dish — identity, not garnish
                 </p>
               </div>
               <div className="px-5 py-1">
@@ -508,7 +518,10 @@ export function RecipeView({
           <h2 className="text-sm font-semibold uppercase tracking-wider text-orange-900">
             Substitutions
           </h2>
-          <ul className="mt-4 space-y-4">
+          <p className="mt-1 text-xs text-orange-800/70">
+            Role-preserving swaps — same job in the dish
+          </p>
+          <ul className="mt-3 space-y-4">
             {meaningfulSubstitutions.map((sub, i) => {
               const o = typeof sub === "object" && sub ? sub : null;
               const main =
@@ -560,9 +573,14 @@ export function RecipeView({
 
       {/* Steps */}
       <section id="recipe-steps" className="scroll-mt-24 space-y-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-800">
-          Steps
-        </h2>
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-800">
+            Steps
+          </h2>
+          <p className="mt-1 text-xs text-neutral-500">
+            One cookable flow — ordered, family-aware, no pasted fragments
+          </p>
+        </div>
         {steps.length === 0 ? (
           <p className="text-sm text-neutral-400">No steps yet.</p>
         ) : (
@@ -623,7 +641,10 @@ export function RecipeView({
           <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-800">
             Tips
           </h2>
-          <ul className="mt-4 space-y-2.5 text-[15px] leading-relaxed text-neutral-700">
+          <p className="mt-1 text-xs text-neutral-500">
+            Quick extras from your sources — execution, flavor, style
+          </p>
+          <ul className="mt-3 space-y-2.5 text-[15px] leading-relaxed text-neutral-700">
             {tips.map((tip, i) => (
               <li key={i} className="flex gap-2">
                 <span className="text-emerald-600" aria-hidden>
@@ -646,7 +667,7 @@ export function RecipeView({
             aria-expanded={historyOpen}
           >
             <span className="text-sm font-semibold text-neutral-900">
-              Updated from {nSources} sources
+              History — {nSources} source{nSources === 1 ? "" : "s"}
             </span>
             <span
               className={`text-neutral-400 transition-transform duration-200 ease-out ${

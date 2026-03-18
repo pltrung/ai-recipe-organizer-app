@@ -27,6 +27,8 @@ import {
   heuristicDiffSummary,
 } from "@/lib/recipeDiffAi";
 import type { Recipe } from "@/lib/types";
+import { confidenceFromPlatformRaw } from "@/lib/sourceSynthesisConfidence";
+import type { PendingMergeV1 } from "@/lib/mergePending";
 
 const WEAK_RAW_LEN = 200;
 
@@ -208,6 +210,16 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      const newSourceConfidence = confidenceFromPlatformRaw(
+        platformFromClient || plat,
+        rawText.length
+      );
+      const sourceSummaryPayload = {
+        source_url: sourceUrl || newSourceLabel,
+        source_type: plat,
+        confidence: newSourceConfidence,
+      };
+
       if (synthOk && dbPayload) {
         const ingTotal =
           dbPayload.ingredients.core.length +
@@ -216,7 +228,7 @@ export async function POST(req: NextRequest) {
           ingTotal === 0 && dbPayload.steps.length === 0;
 
         console.log(
-          `[extract-from-extension] AI ok title=${dbPayload.title.slice(0, 60)} coreIngs=${dbPayload.ingredients.core.length} steps=${dbPayload.steps.length} tips=${dbPayload.tips.length}`
+          `[extract-from-extension] merge preview title=${dbPayload.title.slice(0, 60)} coreIngs=${dbPayload.ingredients.core.length}`
         );
 
         const previousRecipe = recipeFromDbRow(rec);
@@ -250,26 +262,49 @@ export async function POST(req: NextRequest) {
             heuristicDiffSummary(materialStructured).key_improvements;
         }
         key_improvements = key_improvements.slice(0, 5);
+        let mergeSummary = String(aiPart.summary ?? "").trim();
+        if (key_improvements.length === 0) {
+          key_improvements = [
+            "Your coherent recipe stayed similar — strong sources already aligned.",
+            "Scan Must know, Avoid, and Variants for anything new from this page.",
+          ];
+          mergeSummary =
+            mergeSummary ||
+            "New source merged in. Little changed in the headline recipe — that’s OK. Check tips and variants below.";
+        }
         const at = new Date().toISOString();
         const last_diff = {
           at,
           source_count_after: sourcesAfter,
           structured,
-          summary: aiPart.summary,
-          key_improvements: key_improvements.slice(0, 12),
+          summary: mergeSummary,
+          key_improvements,
         };
-        const prevVer = Array.isArray(rec.versions) ? rec.versions : [];
         const versionEntry = {
           at,
           source_count_after: sourcesAfter,
           summary: last_diff.summary,
-          key_improvements: last_diff.key_improvements.slice(0, 8),
+          key_improvements: last_diff.key_improvements.slice(0, 5),
         };
-        const versions = [versionEntry, ...prevVer].slice(0, 10);
 
-        const { error: upErr } = await supabase
-          .from("recipes")
-          .update({
+        const pendingMerge: PendingMergeV1 = {
+          version: 1,
+          created_at: at,
+          synth_ok: true,
+          source_summary: sourceSummaryPayload,
+          next_source_urls: source_urls,
+          next_source_platforms: source_platforms,
+          next_sources: nextSources,
+          next_raw_texts: nextRawTexts,
+          combined_text: combinedText,
+          source_extractions: (sourceExtractions ?? null) as unknown[] | null,
+          diff: {
+            summary: last_diff.summary,
+            key_improvements: last_diff.key_improvements,
+          },
+          last_diff,
+          version_entry_apply: versionEntry,
+          row_update: {
             title: dbPayload.title,
             description: dbPayload.description,
             ingredients: dbPayload.ingredients,
@@ -281,82 +316,104 @@ export async function POST(req: NextRequest) {
             estimated_time: dbPayload.estimated_time,
             servings: dbPayload.servings,
             servings_base: dbPayload.servings_base,
-            source_urls,
-            source_platforms,
-            sources: nextSources,
-            raw_texts: nextRawTexts,
-            raw_text: combinedText || null,
-            source_extractions: sourceExtractions,
             recipe_quality: dbPayload.recipe_quality,
             needs_user_input,
-            needs_review: false,
-            last_diff,
-            versions,
-            updated_at: at,
-          })
+          },
+        };
+
+        const { error: upErr } = await supabase
+          .from("recipes")
+          .update({ pending_merge: pendingMerge as unknown as Record<string, unknown> })
           .eq("id", recipeId);
 
         if (upErr) {
-          console.error("extract-from-extension update:", upErr);
-          return json({ error: "Failed to update recipe" }, { status: 500 });
+          console.error("extract-from-extension pending_merge:", upErr);
+          return json(
+            {
+              error:
+                "Could not save merge preview. If this persists, run DB migration for pending_merge.",
+            },
+            { status: 500 }
+          );
         }
 
-        console.log(
-          `[extract-from-extension] merge_verify id=${recipeId} body+source_extractions+last_diff+updated_at ok`
-        );
-
-        const { data: fresh } = await supabase
-          .from("recipes")
-          .select("*")
-          .eq("id", recipeId)
-          .single();
-
         return json({
+          reviewRequired: true,
           recipeId,
-          title: dbPayload.title,
-          sourceCount: sourcesAfter,
-          merged: true,
-          synthesisFailed: false,
-          last_diff,
-          recipe: fresh ? fullRecipeFromRow(fresh as Record<string, unknown>) : null,
+          synthOk: true,
+          sourceCountBefore: sourcesBefore,
+          sourceCountAfter: sourcesAfter,
+          proposal: {
+            diff: pendingMerge.diff,
+            sourceSummary: sourceSummaryPayload,
+          },
+          questions: {
+            what_changed: last_diff.summary,
+            better:
+              "If you apply, the recipe on Recipe Cloud updates to this merged version.",
+            worth_keeping:
+              newSourceConfidence === "low"
+                ? "This source looks thin (e.g. reel/social). Keeping it still saves the link for reference."
+                : "This source looks detailed enough to anchor changes.",
+          },
         });
       }
 
       console.warn(
-        `[extract-from-extension] AI failed or skipped; appending source only, needs_review=true`
+        `[extract-from-extension] merge preview only (synth failed); user can keep source or discard`
       );
 
-      const { error: upErr } = await supabase
+      const atFail = new Date().toISOString();
+      const pendingFail: PendingMergeV1 = {
+        version: 1,
+        created_at: atFail,
+        synth_ok: false,
+        source_summary: sourceSummaryPayload,
+        next_source_urls: source_urls,
+        next_source_platforms: source_platforms,
+        next_sources: nextSources,
+        next_raw_texts: nextRawTexts,
+        combined_text: combinedText,
+        source_extractions: null,
+        diff: {
+          summary:
+            "We couldn’t produce an updated recipe from this page yet (capture may be short or low-detail).",
+          key_improvements: [
+            "Try a blog or full recipe page, or add more text from the page.",
+            "You can still save this URL under your recipe for reference.",
+          ],
+        },
+        last_diff: null,
+        version_entry_apply: null,
+        row_update: null,
+      };
+
+      const { error: upFail } = await supabase
         .from("recipes")
-        .update({
-          source_urls,
-          source_platforms,
-          sources: nextSources,
-          raw_texts: nextRawTexts,
-          raw_text: combinedText || null,
-          needs_review: true,
-          updated_at: new Date().toISOString(),
-        })
+        .update({ pending_merge: pendingFail as unknown as Record<string, unknown> })
         .eq("id", recipeId);
 
-      if (upErr) {
-        console.error("extract-from-extension partial update:", upErr);
-        return json({ error: "Failed to update recipe" }, { status: 500 });
+      if (upFail) {
+        console.error("extract-from-extension pending_merge fail:", upFail);
+        return json({ error: "Failed to save merge preview" }, { status: 500 });
       }
 
-      const { data: fresh } = await supabase
-        .from("recipes")
-        .select("*")
-        .eq("id", recipeId)
-        .single();
-
       return json({
+        reviewRequired: true,
         recipeId,
-        title: fallbackTitle,
-        sourceCount: sourcesAfter,
-        merged: true,
-        synthesisFailed: true,
-        recipe: fresh ? fullRecipeFromRow(fresh as Record<string, unknown>) : null,
+        synthOk: false,
+        sourceCountBefore: sourcesBefore,
+        sourceCountAfter: sourcesAfter,
+        proposal: {
+          diff: pendingFail.diff,
+          sourceSummary: sourceSummaryPayload,
+        },
+        questions: {
+          what_changed: pendingFail.diff.summary,
+          better: "Apply is unavailable until a future re-synthesis from the app.",
+          worth_keeping:
+            "Save the link anyway if you want it in your source list.",
+        },
       });
     }
 
