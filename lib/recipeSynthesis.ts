@@ -10,6 +10,7 @@ import type {
   StructuredIngredient,
 } from "./types";
 import { servingsDisplayLabel } from "./ingredientScale";
+import { applyIngredientPostProcess } from "./ingredientSemanticRefine";
 
 const SYNTHESIS_SYSTEM = `You are a professional chef.
 
@@ -318,6 +319,15 @@ export async function synthesizeRecipeFromVersions(
       parsed = JSON.parse(raw) as Record<string, unknown>;
       result = mapResult(parsed);
     }
+
+    const post = await applyIngredientPostProcess(
+      {
+        title: result.title,
+        ingredients: result.ingredients,
+      },
+      openaiApiKey
+    );
+    result = { ...result, ingredients: post.ingredients };
 
     return {
       title: result.title,
@@ -775,6 +785,12 @@ export async function synthesizeRecipeFromCombinedRaw(
         );
       }
     }
+
+    const post = await applyIngredientPostProcess(
+      { title: result.title, ingredients: result.ingredients },
+      openaiApiKey
+    );
+    result = { ...result, ingredients: post.ingredients };
 
     return {
       title: result.title,

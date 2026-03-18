@@ -39,7 +39,7 @@ export default async function RecipePage({
   return (
     <div className="min-h-screen bg-[#fafafa]">
       <header className="border-b border-neutral-100 bg-white">
-        <div className="mx-auto flex max-w-2xl items-center justify-between px-4 py-4">
+        <div className="mx-auto flex max-w-[720px] items-center justify-between px-4 py-4">
           <Link href="/dashboard" className="text-sm font-medium text-neutral-600 hover:text-neutral-900">
             ← Dashboard
           </Link>
@@ -48,7 +48,7 @@ export default async function RecipePage({
           </Link>
         </div>
       </header>
-      <main className="mx-auto max-w-2xl px-4 py-10">
+      <main className="mx-auto max-w-[720px] px-4 py-8 sm:py-12">
         <RecipeUpdatedModal
           lastDiff={recipe.last_diff}
           openWhenPresent={updated != null && updated !== ""}
@@ -64,6 +64,7 @@ export default async function RecipePage({
           sourceCount={sourceCount}
           needsUserInput={recipe.needs_user_input}
           needsReview={recipe.needs_review}
+          lastDiff={recipe.last_diff}
         />
       </main>
     </div>
