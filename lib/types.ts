@@ -30,28 +30,54 @@ export interface ExtractionResult {
   source_label?: string; // e.g. "YouTube video", "Blog"
 }
 
+/** Parsed ingredient for scaling (DB + extract + merge) */
+export interface StructuredIngredient {
+  quantity: number | null;
+  unit: string;
+  name: string;
+  /** Full line as captured (fallback when unscaled) */
+  original: string;
+}
+
+export interface ScaledIngredient extends StructuredIngredient {
+  scaledQuantity: number | null;
+}
+
 export interface ExtractedRecipe {
   title: string;
   description: string;
-  ingredients: string[];
+  ingredients: StructuredIngredient[];
   steps: string[];
   estimated_time: string;
+  /** Human-readable, e.g. "4 servings" */
   servings: string;
+  /** Numeric base for scaling; default 1 */
+  servings_base: number;
 }
 
 export interface ExtractedRecipeWithConfidence extends ExtractedRecipe {
   confidence: Confidence;
 }
 
+/** Grouped ingredients; legacy rows may use string[] items */
+export type RecipeIngredientsGrouped = {
+  core: StructuredIngredient[];
+  optional: StructuredIngredient[];
+};
+
 export interface Recipe {
   id?: string;
   user_id?: string | null;
   title: string;
   description: string;
-  ingredients: string[];
+  ingredients: RecipeIngredientsGrouped;
   steps: string[];
+  /** Chef tips / enhancements from merged sources */
+  tips: string[];
   estimated_time: string;
   servings: string;
+  /** Base serving count for ingredient scaling */
+  servings_base: number;
   source_urls: string[];
   source_platforms: string[];
   raw_text?: string;
@@ -68,8 +94,10 @@ export interface RecipeRow {
   description: string;
   ingredients: Record<string, unknown>;
   steps: Record<string, unknown>;
+  tips?: unknown;
   estimated_time: string;
   servings: string;
+  servings_base?: number;
   source_urls: Record<string, unknown>;
   source_platforms: Record<string, unknown>;
   raw_text: string | null;

@@ -1,20 +1,13 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabaseClient";
-import { RecipeCard } from "@/components/RecipeCard";
+import {
+  DashboardClient,
+  type DashboardRecipeRow,
+} from "@/components/DashboardClient";
 
 export const dynamic = "force-dynamic";
 
-type DashboardRecipe = {
-  id: string;
-  title: string;
-  description: string;
-  source_platforms: string[];
-  source_urls: string[];
-  updated_at: string | null;
-  created_at: string | null;
-};
-
-async function getRecipes(): Promise<DashboardRecipe[]> {
+async function getRecipes(): Promise<DashboardRecipeRow[]> {
   const supabase = createClient();
   const { data, error } = await supabase
     .from("recipes")
@@ -24,29 +17,33 @@ async function getRecipes(): Promise<DashboardRecipe[]> {
     .order("updated_at", { ascending: false })
     .limit(50);
   if (error) return [];
-  return (data ?? []).map((r) => ({
-    id: r.id,
-    title: r.title,
-    description: r.description ?? "",
-    source_platforms: (r.source_platforms as string[]) ?? [],
-    source_urls: (r.source_urls as string[]) ?? [],
-    updated_at: r.updated_at ?? null,
-    created_at: r.created_at ?? null,
-  }));
-}
-
-function formatUpdated(iso: string | null, created: string | null) {
-  const d = iso || created;
-  if (!d) return "";
-  try {
-    return new Date(d).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-  } catch {
-    return "";
-  }
+  return (data ?? []).map((r) => {
+    const urls = (r.source_urls as string[]) ?? [];
+    const plats = (r.source_platforms as string[]) ?? [];
+    const n = Math.max(urls.length, plats.length);
+    const d = r.updated_at ?? r.created_at;
+    let updatedLabel = "";
+    if (d) {
+      try {
+        updatedLabel = new Date(d).toLocaleString(undefined, {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        });
+      } catch {
+        updatedLabel = "";
+      }
+    }
+    return {
+      id: r.id,
+      title: r.title,
+      description: r.description ?? "",
+      sourceCount: n,
+      updatedLabel,
+    };
+  });
 }
 
 export default async function DashboardPage() {
@@ -71,34 +68,10 @@ export default async function DashboardPage() {
           Your saved recipes
         </h2>
         <p className="mt-1 text-sm text-neutral-500">
-          Browse → Save pages with the extension → Your recipe improves over time.
+          Browse → Pick a recipe in the extension → Add pages → Your recipe
+          improves over time.
         </p>
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {recipes.length === 0 ? (
-            <div className="col-span-full rounded-2xl border border-dashed border-neutral-200 bg-white p-12 text-center text-neutral-500">
-              No recipes yet.{" "}
-              <Link href="/create" className="text-neutral-900 underline">
-                Create one
-              </Link>{" "}
-              or use the Chrome extension on a recipe page.
-            </div>
-          ) : (
-            recipes.map((recipe) => (
-              <RecipeCard
-                key={recipe.id}
-                recipe={recipe}
-                sourceCount={Math.max(
-                  recipe.source_urls?.length ?? 0,
-                  recipe.source_platforms?.length ?? 0
-                )}
-                updatedLabel={formatUpdated(
-                  recipe.updated_at,
-                  recipe.created_at
-                )}
-              />
-            ))
-          )}
-        </div>
+        <DashboardClient recipes={recipes} />
       </main>
     </div>
   );

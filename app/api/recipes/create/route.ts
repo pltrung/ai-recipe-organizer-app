@@ -3,8 +3,11 @@ import { createServerClient } from "@/lib/supabaseServer";
 import { classifyLink } from "@/lib/classifyLink";
 import { detectPlatform } from "@/lib/platformDetector";
 import { ingestUrl, ingestImage } from "@/lib/sourcePipeline";
-import { mergeRecipesWithConfidence } from "@/lib/aiMerge";
-import type { Recipe } from "@/lib/types";
+import {
+  mergeRecipesIntelligent,
+  mergedOutputToDbRow,
+} from "@/lib/aiMerge";
+import { parseIngredientLine } from "@/lib/ingredientParser";
 
 export async function POST(req: NextRequest) {
   try {
@@ -33,10 +36,17 @@ export async function POST(req: NextRequest) {
           user_id: body.user_id ?? null,
           title: fallback.title || dishName || "Untitled Recipe",
           description: "",
-          ingredients: fallback.ingredients,
+          ingredients: {
+            core: fallback.ingredients.map((s: string) =>
+              parseIngredientLine(String(s).trim())
+            ),
+            optional: [],
+          },
+          tips: [] as string[],
           steps: fallback.steps,
           estimated_time: "—",
-          servings: "—",
+          servings: "1 serving",
+          servings_base: 1,
           source_urls: validUrls,
           source_platforms: validUrls.map((u: string) => detectPlatform(u)),
           raw_text: null,
@@ -171,10 +181,12 @@ export async function POST(req: NextRequest) {
           user_id: body.user_id ?? null,
           title: draftTitle,
           description: "",
-          ingredients: [],
+          ingredients: { core: [], optional: [] },
+          tips: [] as string[],
           steps: [],
           estimated_time: "—",
-          servings: "—",
+          servings: "1 serving",
+          servings_base: 1,
           source_urls: sourceUrls,
           source_platforms: sourcePlatforms,
           raw_text: rawTextParts.join("\n\n") || null,
@@ -202,33 +214,38 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    let merged: import("@/lib/types").ExtractedRecipe | null = null;
-    if (successfulRecipes.length === 1) {
-      merged = successfulRecipes[0];
-    } else {
-      merged = await mergeRecipesWithConfidence(successfulRecipes, openaiKey);
-      if (!merged) {
-        merged = successfulRecipes[0];
-      }
+    let mergedOut =
+      (await mergeRecipesIntelligent(successfulRecipes, openaiKey)) ??
+      null;
+    if (!mergedOut) {
+      mergedOut = await mergeRecipesIntelligent(
+        [successfulRecipes[0]],
+        openaiKey
+      );
     }
+    const dbPayload = mergedOutputToDbRow(mergedOut!);
 
-    const title = dishName && dishName.length > 0 ? dishName : merged!.title;
-    const recipeRow: Omit<Recipe, "id" | "created_at"> = {
+    const title =
+      dishName && dishName.length > 0 ? dishName : dbPayload.title;
+    const recipeRow = {
       user_id: body.user_id ?? null,
       title,
-      description: merged!.description,
-      ingredients: merged!.ingredients,
-      steps: merged!.steps,
-      estimated_time: merged!.estimated_time,
-      servings: merged!.servings,
+      description: dbPayload.description,
+      ingredients: dbPayload.ingredients,
+      steps: dbPayload.steps,
+      tips: dbPayload.tips,
+      estimated_time: dbPayload.estimated_time,
+      servings: dbPayload.servings,
+      servings_base: dbPayload.servings_base,
       source_urls: sourceUrls,
       source_platforms: sourcePlatforms,
       raw_text: rawTextParts.join("\n\n") || undefined,
     };
 
     const supabase = createServerClient();
-    const needsUserInput =
-      merged!.ingredients.length === 0 && merged!.steps.length === 0;
+    const ingTotal =
+      dbPayload.ingredients.core.length + dbPayload.ingredients.optional.length;
+    const needsUserInput = ingTotal === 0 && dbPayload.steps.length === 0;
     const { data, error } = await supabase
       .from("recipes")
       .insert({
@@ -237,8 +254,10 @@ export async function POST(req: NextRequest) {
         description: recipeRow.description,
         ingredients: recipeRow.ingredients,
         steps: recipeRow.steps,
+        tips: recipeRow.tips,
         estimated_time: recipeRow.estimated_time,
         servings: recipeRow.servings,
+        servings_base: recipeRow.servings_base,
         source_urls: recipeRow.source_urls,
         source_platforms: recipeRow.source_platforms,
         raw_text: recipeRow.raw_text,

@@ -1,25 +1,40 @@
-import type { ExtractedRecipe } from "./types";
+import type { ExtractedRecipe, StructuredIngredient } from "./types";
+import {
+  coerceStructuredIngredient,
+  parseIngredientLine,
+} from "./ingredientParser";
+import {
+  parseServingsCount,
+  servingsDisplayLabel,
+} from "./ingredientScale";
 
 const EXTRACT_SYSTEM =
-  "You extract recipes and ALWAYS return valid JSON.";
+  "You extract recipes and ALWAYS return valid JSON. Use structured ingredients with numeric quantities when possible.";
 
 const EXTRACT_USER = (raw_text: string) => `Extract ANY possible recipe information from the text.
 
 Return STRICT JSON ONLY:
 {
   "title": string,
-  "ingredients": string[],
+  "servings": number,
+  "ingredients": [
+    {
+      "quantity": number | null,
+      "unit": string,
+      "name": string,
+      "original": string
+    }
+  ],
   "steps": string[]
 }
 
 Rules:
-
+* servings: positive integer (people the recipe feeds). If unknown, use 1.
+* Each ingredient: quantity is a number (use decimals for fractions, e.g. 0.5 for half); unit is short (cup, tbsp, tsp, lb, g, ml, etc.) or "" if none; name is the food item only; original is the full line as written in the text.
+* If you cannot parse an amount (e.g. "salt to taste", "1–2 tbsp oil"), set quantity null, unit "", name/description as the full sensible phrase, original the full line.
 * DO NOT include explanation or markdown
 * ALWAYS return JSON even if partial
-* If ingredients exist, include them
-* If steps are incomplete, include them anyway
-* If unclear, infer reasonable cooking steps
-* DO NOT return empty arrays unless absolutely no signal exists
+* steps: actionable steps; empty only if no cooking steps exist
 
 TEXT:
 ${raw_text.slice(0, 12000)}`;
@@ -29,19 +44,35 @@ const MEASURE_RE =
 const VERB_STEP =
   /\b(cook|mix|add|boil|simmer|bake|fry|stir|heat|pour|chop|slice|dice|combine|whisk|marinate|serve|drain|blend|roast|grill)\b/i;
 
+function ingredientsFromParsedList(raw: unknown): StructuredIngredient[] {
+  if (!Array.isArray(raw)) return [];
+  const out: StructuredIngredient[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const ing = coerceStructuredIngredient(item);
+    const key = (ing.original || ing.name || "").slice(0, 200);
+    if (!key.trim()) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ing);
+  }
+  return out;
+}
+
 function heuristicRecipeFromText(raw: string): ExtractedRecipe {
   const lines = raw.split(/\n/).map((l) => l.trim()).filter(Boolean);
-  const ingredients: string[] = [];
+  const ingredients: StructuredIngredient[] = [];
   const steps: string[] = [];
 
   for (const line of lines) {
     const L = line.trim();
     if (/^[-*•]\s+/.test(L)) {
-      ingredients.push(L.replace(/^[-*•]\s+/, ""));
+      const text = L.replace(/^[-*•]\s+/, "");
+      ingredients.push(parseIngredientLine(text));
       continue;
     }
     if (MEASURE_RE.test(L) && L.length < 200) {
-      ingredients.push(L.replace(/^[-*•]\s*/, ""));
+      ingredients.push(parseIngredientLine(L.replace(/^[-*•]\s*/, "")));
       continue;
     }
     if (/^\d+[\).\]]\s*\S/.test(L)) {
@@ -72,7 +103,8 @@ function heuristicRecipeFromText(raw: string): ExtractedRecipe {
     ingredients: ingredients.slice(0, 120),
     steps: steps.slice(0, 120),
     estimated_time: "—",
-    servings: "—",
+    servings: servingsDisplayLabel(1),
+    servings_base: 1,
   };
 }
 
@@ -94,7 +126,8 @@ function lastResortFromRaw(raw: string): ExtractedRecipe {
             "Review captured page text below or add another source to improve this recipe.",
           ],
     estimated_time: "—",
-    servings: "—",
+    servings: servingsDisplayLabel(1),
+    servings_base: 1,
   };
 }
 
@@ -102,15 +135,32 @@ function normalizeFromParsed(
   parsed: Record<string, unknown>,
   rawText: string
 ): ExtractedRecipe {
-  const ingredients = Array.isArray(parsed.ingredients)
-    ? parsed.ingredients.map((i) => String(i).trim()).filter(Boolean)
-    : [];
+  let ingredients = ingredientsFromParsedList(parsed.ingredients);
+  if (
+    ingredients.length === 0 &&
+    Array.isArray(parsed.ingredients) &&
+    parsed.ingredients.every((x) => typeof x === "string")
+  ) {
+    ingredients = (parsed.ingredients as string[])
+      .map((s) => parseIngredientLine(String(s).trim()))
+      .filter((i) => i.original || i.name);
+  }
+
   const steps = Array.isArray(parsed.steps)
     ? parsed.steps.map((s) => String(s).trim()).filter(Boolean)
     : [];
   const title =
     String(parsed.title ?? "").trim() ||
     (rawText.match(/^Recipe:\s*(.+)$/im)?.[1]?.trim() ?? "Recipe");
+
+  const sbFromNum =
+    typeof parsed.servings === "number" &&
+    parsed.servings > 0 &&
+    parsed.servings < 500
+      ? Math.round(parsed.servings)
+      : null;
+  const servings_base =
+    sbFromNum ?? parseServingsCount(parsed.servings) ?? 1;
 
   if (ingredients.length > 0 || steps.length > 0) {
     return {
@@ -119,7 +169,8 @@ function normalizeFromParsed(
       ingredients,
       steps,
       estimated_time: "—",
-      servings: "—",
+      servings: servingsDisplayLabel(servings_base),
+      servings_base,
     };
   }
 
@@ -136,16 +187,18 @@ function normalizeFromParsed(
     ingredients: [],
     steps: [],
     estimated_time: "—",
-    servings: "—",
+    servings: servingsDisplayLabel(1),
+    servings_base: 1,
   };
 }
 
 function fallbackFromMalformedAi(aiRaw: string, raw: string): ExtractedRecipe {
-  const ingredients: string[] = [];
+  const ingredients: StructuredIngredient[] = [];
   const steps: string[] = [];
   for (const line of aiRaw.split("\n")) {
     const L = line.trim();
-    if (/^[-*•]\s*\S/.test(L)) ingredients.push(L.replace(/^[-*•]\s+/, ""));
+    if (/^[-*•]\s*\S/.test(L))
+      ingredients.push(parseIngredientLine(L.replace(/^[-*•]\s+/, "")));
     if (/^\d+[\).\]]\s+\S/.test(L))
       steps.push(L.replace(/^\d+[\).\]]\s+/, ""));
   }
@@ -156,7 +209,8 @@ function fallbackFromMalformedAi(aiRaw: string, raw: string): ExtractedRecipe {
       ingredients,
       steps,
       estimated_time: "—",
-      servings: "—",
+      servings: servingsDisplayLabel(1),
+      servings_base: 1,
     };
   }
   const h = heuristicRecipeFromText(raw);
@@ -175,7 +229,8 @@ export async function extractRecipe(
       ingredients: [],
       steps: [],
       estimated_time: "—",
-      servings: "—",
+      servings: servingsDisplayLabel(1),
+      servings_base: 1,
     };
   }
 

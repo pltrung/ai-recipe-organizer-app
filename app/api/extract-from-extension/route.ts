@@ -2,10 +2,26 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabaseServer";
 import { detectPlatform } from "@/lib/platformDetector";
 import { extractRecipe } from "@/lib/aiExtractor";
-import { mergeRecipes } from "@/lib/aiMerge";
-import type { ExtractedRecipe } from "@/lib/types";
+import {
+  mergeRecipesIntelligent,
+  mergedOutputToDbRow,
+} from "@/lib/aiMerge";
+import { recipeFromDbRow } from "@/lib/parseRecipeFromDb";
+import type { ExtractedRecipeWithConfidence } from "@/lib/types";
+import { EXTENSION_CORS_HEADERS } from "@/lib/extensionCors";
 
 const WEAK_RAW_LEN = 200;
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: EXTENSION_CORS_HEADERS });
+}
+
+function json(data: object, init?: ResponseInit) {
+  return NextResponse.json(data, {
+    ...init,
+    headers: { ...EXTENSION_CORS_HEADERS, ...(init?.headers as object) },
+  });
+}
 
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -28,21 +44,29 @@ function mergeSources(
   return { urls, plats };
 }
 
-function rowToExtracted(row: {
-  title: string;
-  description: string | null;
-  ingredients: unknown;
-  steps: unknown;
-  estimated_time: string | null;
-  servings: string | null;
-}): ExtractedRecipe {
+function rowToMergeSource(
+  row: Record<string, unknown>
+): ExtractedRecipeWithConfidence {
+  const r = recipeFromDbRow(row);
+  const flat = [...r.ingredients.core, ...r.ingredients.optional];
+  const legacy = asStringArray(row.ingredients);
   return {
-    title: row.title || "Recipe",
-    description: String(row.description ?? ""),
-    ingredients: asStringArray(row.ingredients),
+    title: r.title || "Recipe",
+    description: r.description,
+    ingredients:
+      flat.length > 0
+        ? flat
+        : legacy.map((s) => ({
+            quantity: null as number | null,
+            unit: "",
+            name: s,
+            original: s,
+          })),
     steps: asStringArray(row.steps),
-    estimated_time: String(row.estimated_time ?? "").trim() || "—",
-    servings: String(row.servings ?? "").trim() || "—",
+    estimated_time: r.estimated_time || "—",
+    servings: r.servings,
+    servings_base: r.servings_base,
+    confidence: "high",
   };
 }
 
@@ -84,7 +108,7 @@ export async function POST(req: NextRequest) {
         .single();
 
       if (fetchErr || !row) {
-        return NextResponse.json({ error: "Recipe not found" }, { status: 404 });
+        return json({ error: "Recipe not found" }, { status: 404 });
       }
 
       const prevUrls = asStringArray(row.source_urls);
@@ -96,38 +120,56 @@ export async function POST(req: NextRequest) {
         plat
       );
 
-      const separator = row.raw_text ? `\n\n---\n${sourceUrl || "source"}\n---\n\n` : "";
+      const separator = row.raw_text
+        ? `\n\n---\n${sourceUrl || "source"}\n---\n\n`
+        : "";
       const rawCombined = `${row.raw_text ?? ""}${separator}${rawText}`.slice(
         0,
         500_000
       );
 
-      const existing = rowToExtracted(row);
-      let merged: ExtractedRecipe = existing;
+      /** Existing row + new page → mergeRecipesIntelligent (dedupe ingredients, rewrite steps, tips) */
+      const existing = rowToMergeSource(row);
+      let dbPayload = mergedOutputToDbRow(
+        (await mergeRecipesIntelligent([existing], openaiKey || ""))!
+      );
 
-      if (!isWeak && openaiKey) {
-        const newPart = await extractRecipe(rawText, openaiKey);
+      if (!isWeak) {
+        const newPart = await extractRecipe(rawText, openaiKey || "");
         const hasNew =
-          newPart &&
-          (newPart.ingredients.length > 0 || newPart.steps.length > 0);
-        if (hasNew && newPart) {
-          const out = await mergeRecipes([existing, newPart], openaiKey);
-          if (out) merged = out;
+          newPart.ingredients.length > 0 || newPart.steps.length > 0;
+        if (hasNew) {
+          const newWithConf: ExtractedRecipeWithConfidence = {
+            ...newPart,
+            confidence: "medium",
+          };
+          const mergedOut = await mergeRecipesIntelligent(
+            [existing, newWithConf],
+            openaiKey || ""
+          );
+          if (mergedOut) dbPayload = mergedOutputToDbRow(mergedOut);
         }
       }
 
+      const ingTotal =
+        dbPayload.ingredients.core.length +
+        dbPayload.ingredients.optional.length;
       const needs_user_input =
-        merged.ingredients.length === 0 && merged.steps.length === 0;
+        ingTotal === 0 && dbPayload.steps.length === 0;
+
+      const preserved = recipeFromDbRow(row as Record<string, unknown>);
 
       const { error: upErr } = await supabase
         .from("recipes")
         .update({
-          title: merged.title,
-          description: merged.description,
-          ingredients: merged.ingredients,
-          steps: merged.steps,
-          estimated_time: merged.estimated_time,
-          servings: merged.servings,
+          title: dbPayload.title,
+          description: dbPayload.description,
+          ingredients: dbPayload.ingredients,
+          steps: dbPayload.steps,
+          tips: dbPayload.tips,
+          estimated_time: dbPayload.estimated_time,
+          servings: preserved.servings || dbPayload.servings,
+          servings_base: preserved.servings_base,
           source_urls,
           source_platforms,
           raw_text: rawCombined || null,
@@ -138,22 +180,18 @@ export async function POST(req: NextRequest) {
 
       if (upErr) {
         console.error("extract-from-extension update:", upErr);
-        return NextResponse.json(
-          { error: "Failed to update recipe" },
-          { status: 500 }
-        );
+        return json({ error: "Failed to update recipe" }, { status: 500 });
       }
 
-      return NextResponse.json({
+      return json({
         recipeId,
-        title: merged.title,
+        title: dbPayload.title,
         sourceCount: Math.max(source_urls.length, 1),
         merged: true,
       });
     }
 
-    // —— Create new recipe (always persist; draft if weak capture) ——
-    let extracted: ExtractedRecipe;
+    let extracted: import("@/lib/types").ExtractedRecipe;
     if (isWeak || !openaiKey) {
       extracted = {
         title: "Draft Recipe",
@@ -161,7 +199,8 @@ export async function POST(req: NextRequest) {
         ingredients: [],
         steps: [],
         estimated_time: "—",
-        servings: "—",
+        servings: "1 serving",
+        servings_base: 1,
       };
     } else {
       extracted = await extractRecipe(rawText, openaiKey);
@@ -187,10 +226,15 @@ export async function POST(req: NextRequest) {
         user_id: null,
         title,
         description: extracted.description,
-        ingredients: extracted.ingredients,
+        ingredients: {
+          core: extracted.ingredients,
+          optional: [],
+        },
         steps: extracted.steps,
+        tips: [] as string[],
         estimated_time: extracted.estimated_time,
         servings: extracted.servings,
+        servings_base: extracted.servings_base,
         source_urls,
         source_platforms,
         raw_text: rawText || null,
@@ -202,13 +246,10 @@ export async function POST(req: NextRequest) {
 
     if (error) {
       console.error("extract-from-extension insert:", error);
-      return NextResponse.json(
-        { error: "Failed to save recipe" },
-        { status: 500 }
-      );
+      return json({ error: "Failed to save recipe" }, { status: 500 });
     }
 
-    return NextResponse.json({
+    return json({
       recipeId: data.id,
       title,
       sourceCount: Math.max(source_urls.length, 1),
@@ -216,6 +257,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (e) {
     console.error("extract-from-extension error:", e);
-    return NextResponse.json({ error: "Server error" }, { status: 500 });
+    return json({ error: "Server error" }, { status: 500 });
   }
 }

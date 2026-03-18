@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabaseClient";
 import { RecipeView } from "@/components/RecipeView";
+import { recipeFromDbRow } from "@/lib/parseRecipeFromDb";
 import type { Recipe } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -14,20 +15,7 @@ async function getRecipe(id: string): Promise<Recipe | null> {
     .eq("id", id)
     .single();
   if (error || !data) return null;
-  return {
-    id: data.id,
-    title: data.title,
-    description: data.description ?? "",
-    ingredients: Array.isArray(data.ingredients) ? data.ingredients : [],
-    steps: Array.isArray(data.steps) ? data.steps : [],
-    estimated_time: data.estimated_time ?? "",
-    servings: data.servings ?? "",
-    source_urls: Array.isArray(data.source_urls) ? data.source_urls : [],
-    source_platforms: Array.isArray(data.source_platforms)
-      ? data.source_platforms
-      : [],
-    needs_user_input: Boolean(data.needs_user_input),
-  };
+  return recipeFromDbRow(data as Record<string, unknown>);
 }
 
 export default async function RecipePage({

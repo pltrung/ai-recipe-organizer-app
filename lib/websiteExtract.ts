@@ -2,6 +2,8 @@ import { load } from "cheerio";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import type { Confidence, ExtractedRecipe } from "./types";
+import { parseIngredientLine } from "./ingredientParser";
+import { parseServingsCount, servingsDisplayLabel } from "./ingredientScale";
 
 const BROWSER_HEADERS = {
   "User-Agent":
@@ -100,25 +102,28 @@ function recipeNodeToExtracted(node: Record<string, unknown>): ExtractedRecipe {
   const description = node.description
     ? String(node.description).slice(0, 3000)
     : "";
-  const ingredients = normalizeIngredients(
+  const ingStrings = normalizeIngredients(
     node.recipeIngredient ?? node.ingredients
   );
+  const ingredients = ingStrings.map((s) => parseIngredientLine(s));
   const steps = flattenInstructions(
     node.recipeInstructions ?? node.instructions
   );
   const cook = node.totalTime ?? node.cookTime ?? node.prepTime;
   const y = node.recipeYield;
-  let servings = "—";
-  if (y != null) {
-    servings = Array.isArray(y) ? y.map(String).join(", ") : String(y);
-  }
+  const yieldLabel =
+    y != null ? (Array.isArray(y) ? y.map(String).join(", ") : String(y)) : "";
+  const servings_base = parseServingsCount(yieldLabel) ?? 1;
+  const servings =
+    yieldLabel.trim() || servingsDisplayLabel(servings_base);
   return {
     title,
     description,
     ingredients,
     steps,
     estimated_time: typeof cook === "string" ? cook : "—",
-    servings: servings || "—",
+    servings,
+    servings_base,
   };
 }
 
@@ -128,7 +133,7 @@ function recipeNodeToText(node: Record<string, unknown>): string {
     `Recipe: ${ex.title}`,
     ex.description ? `Description: ${ex.description}` : "",
     "Ingredients:",
-    ...ex.ingredients.map((i) => `- ${i}`),
+    ...ex.ingredients.map((i) => `- ${i.original || i.name}`),
     "Instructions:",
     ...ex.steps.map((t, i) => `${i + 1}. ${t}`),
   ].filter(Boolean);

@@ -5,18 +5,20 @@ const STORAGE_COUNT = "activeSourceCount";
 
 function setStatus(msg, type) {
   const el = document.getElementById("status");
-  el.textContent = msg;
-  el.className = "show " + (type || "info");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.className = msg ? "show " + (type || "info") : "";
 }
 
 function showView(name) {
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  const map = {
-    none: "view-no-active",
-    active: "view-active",
-    success: "view-success",
-  };
-  document.getElementById(map[name]).classList.add("active");
+  document.getElementById(name === "success" ? "view-success" : "view-main").classList.add("active");
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
 }
 
 async function getBackendBase() {
@@ -42,42 +44,114 @@ async function fetchWithFallback(path, options) {
   throw lastErr || new Error("Failed to fetch");
 }
 
+let lastBase = null;
+let lastRecipeId = null;
+let recentRecipes = [];
+let activeId = null;
+let activeTitle = "";
+
 document.getElementById("open-options").addEventListener("click", (e) => {
+  e.preventDefault();
+  chrome.runtime.openOptionsPage();
+});
+document.getElementById("open-options-2").addEventListener("click", (e) => {
   e.preventDefault();
   chrome.runtime.openOptionsPage();
 });
 
 (async function initHint() {
   const b = await getBackendBase();
-  document.getElementById("backend-hint").textContent = b
-    ? `API: ${b}`
-    : "API: 127.0.0.1:3000 — set Vercel URL in settings if needed.";
+  const el = document.getElementById("backend-hint");
+  if (el)
+    el.textContent = b
+      ? `API: ${b}`
+      : "API: 127.0.0.1:3000 — set your deployed URL in settings.";
 })();
 
-async function refreshUI() {
-  const s = await chrome.storage.local.get([
+function renderChoices() {
+  const loading = document.getElementById("choices-loading");
+  const box = document.getElementById("choices");
+  loading.style.display = "none";
+  box.style.display = "block";
+  box.innerHTML = "";
+
+  if (activeId) {
+    const lab = document.createElement("label");
+    lab.className = "choice";
+    lab.innerHTML = `<input type="radio" name="target" value="active" checked />
+      <span><strong>Current recipe:</strong> ${escapeHtml(activeTitle || "Recipe")}</span>`;
+    box.appendChild(lab);
+  }
+
+  const sub = document.createElement("p");
+  sub.className = "section-title";
+  sub.textContent = activeId ? "Or pick another recipe" : "Recent recipes";
+  box.appendChild(sub);
+
+  let firstRecentId = null;
+  recentRecipes.forEach((r) => {
+    if (r.id === activeId) return;
+    if (!firstRecentId) firstRecentId = r.id;
+    const lab = document.createElement("label");
+    lab.className = "choice";
+    const sc = r.source_count != null ? r.source_count : 0;
+    lab.innerHTML = `<input type="radio" name="target" value="id:${r.id}" />
+      <span>${escapeHtml(r.title || "Untitled")} <span style="color:#a3a3a3;font-size:11px">(${sc} sources)</span></span>`;
+    box.appendChild(lab);
+  });
+
+  const newLab = document.createElement("label");
+  newLab.className = "choice";
+  newLab.innerHTML = `<input type="radio" name="target" value="new" />
+    <span><strong>Create new recipe</strong></span>`;
+  box.appendChild(newLab);
+
+  if (activeId) {
+    const a = box.querySelector('input[value="active"]');
+    if (a) a.checked = true;
+  } else if (firstRecentId) {
+    const r = box.querySelector(`input[value="id:${firstRecentId}"]`);
+    if (r) r.checked = true;
+  } else {
+    const n = box.querySelector('input[value="new"]');
+    if (n) n.checked = true;
+  }
+}
+
+async function loadRecipesAndRender() {
+  const storage = await chrome.storage.local.get([
     STORAGE_ID,
     STORAGE_TITLE,
     STORAGE_COUNT,
   ]);
-  const id = s[STORAGE_ID];
-  if (id) {
-    document.getElementById("active-title").textContent =
-      s[STORAGE_TITLE] || "Your recipe";
-    const n = Number(s[STORAGE_COUNT]) || 1;
-    document.getElementById("active-sources").textContent =
-      n + (n === 1 ? " source" : " sources");
-    showView("active");
-  } else {
-    showView("none");
+  activeId = storage[STORAGE_ID] || null;
+  activeTitle = storage[STORAGE_TITLE] || "";
+
+  try {
+    const out = await fetchWithFallback("/api/recipes?limit=5", {
+      method: "GET",
+    });
+    const data = await out.res.json().catch(() => ({}));
+    recentRecipes = Array.isArray(data.recipes) ? data.recipes : [];
+  } catch {
+    recentRecipes = [];
   }
+
+  renderChoices();
 }
 
-refreshUI();
+function getSelectedTarget() {
+  const el = document.querySelector('#choices input[name="target"]:checked');
+  if (!el) return { mode: "new" };
+  const v = el.value;
+  if (v === "active" && activeId) return { mode: "merge", recipeId: activeId };
+  if (v === "new") return { mode: "new" };
+  if (v.startsWith("id:")) return { mode: "merge", recipeId: v.slice(3) };
+  return { mode: "new" };
+}
 
 function extractPageContent() {
-  const selectors =
-    'p, span, li, h1, h2, h3, div[role="article"]';
+  const selectors = 'p, span, li, h1, h2, h3, div[role="article"]';
   const exclude =
     "nav, footer, header, [role='navigation'], script, style, noscript";
   const excludeRoots = document.querySelectorAll(exclude);
@@ -99,27 +173,22 @@ function extractPageContent() {
       style.opacity !== "0"
     );
   };
-
   const MIN_CHUNK = 40;
   const MAX_CHUNK = 500;
-
   const nodes = document.querySelectorAll(selectors);
   const parts = [];
   const seen = new Set();
   for (const el of nodes) {
-    if (insideExcluded(el)) continue;
-    if (!isVisible(el)) continue;
+    if (insideExcluded(el) || !isVisible(el)) continue;
     let text = (el.innerText || el.textContent || "")
       .trim()
       .replace(/\s+/g, " ");
     if (text.length < MIN_CHUNK) continue;
     if (text.length > MAX_CHUNK) text = text.slice(0, MAX_CHUNK).trim();
-    if (text.length < MIN_CHUNK) continue;
-    if (seen.has(text)) continue;
+    if (text.length < MIN_CHUNK || seen.has(text)) continue;
     seen.add(text);
     parts.push(text);
   }
-
   let raw_text = parts.join("\n\n").slice(0, 5000);
   if (raw_text.length < MIN_CHUNK && parts.length === 0) {
     const loose = [];
@@ -143,12 +212,8 @@ function extractPageContent() {
   else if (/facebook\.com|fb\.com|fb\.watch/i.test(url)) platform = "facebook";
   else if (/tiktok\.com/i.test(url)) platform = "tiktok";
   else if (/xiaohongshu|xhslink/i.test(url)) platform = "xiaohongshu";
-
   return { raw_text, source_url: url, platform };
 }
-
-let lastBase = null;
-let lastRecipeId = null;
 
 async function postToBackend(payload) {
   const out = await fetchWithFallback("/api/extract-from-extension", {
@@ -161,10 +226,9 @@ async function postToBackend(payload) {
   return { res: out.res, data };
 }
 
-async function runSave(opts) {
-  const { recipeId, recipe_name } = opts;
-  const btn =
-    document.getElementById(recipeId ? "btn-add-page" : "btn-save-new");
+document.getElementById("btn-submit").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-submit");
+  const target = getSelectedTarget();
   btn.disabled = true;
   setStatus("Reading this page…", "info");
 
@@ -174,7 +238,7 @@ async function runSave(opts) {
       currentWindow: true,
     });
     if (!tab?.id) {
-      setStatus("No active tab found.", "err");
+      setStatus("No active tab.", "err");
       btn.disabled = false;
       return;
     }
@@ -204,9 +268,13 @@ async function runSave(opts) {
       raw_text: payload.raw_text,
       source_url: payload.source_url,
       platform: payload.platform,
-      ...(recipeId ? { recipeId } : {}),
-      ...(recipe_name ? { recipe_name } : {}),
     };
+    if (target.mode === "merge" && target.recipeId) {
+      body.recipeId = target.recipeId;
+    } else {
+      const name = document.getElementById("recipe-name").value.trim();
+      if (name) body.recipe_name = name;
+    }
 
     setStatus("Saving…", "info");
     let data;
@@ -216,10 +284,7 @@ async function runSave(opts) {
       res = out.res;
       data = out.data;
     } catch {
-      setStatus(
-        "Can’t reach the app. Run npm run dev or set API URL in settings.",
-        "err"
-      );
+      setStatus("Can’t reach the app. Check API URL in settings.", "err");
       btn.disabled = false;
       return;
     }
@@ -239,9 +304,14 @@ async function runSave(opts) {
       [STORAGE_TITLE]: title,
       [STORAGE_COUNT]: sourceCount,
     });
+    activeId = data.recipeId;
+    activeTitle = title;
 
-    document.getElementById("success-msg").textContent =
-      "Added to " + title + ".";
+    document.getElementById("success-title").textContent = "Added to " + title;
+    document.getElementById("success-sub").textContent =
+      target.mode === "merge"
+        ? "Recipe updated with new source."
+        : "New recipe created from this page.";
     showView("success");
     setStatus("", "info");
     document.getElementById("status").className = "";
@@ -250,32 +320,6 @@ async function runSave(opts) {
     setStatus("Something went wrong.", "err");
   }
   btn.disabled = false;
-}
-
-document.getElementById("btn-save-new").addEventListener("click", () => {
-  const name = document.getElementById("recipe-name").value.trim();
-  runSave({ recipe_name: name || undefined });
-});
-
-document.getElementById("btn-add-page").addEventListener("click", async () => {
-  const { activeRecipeId } = await chrome.storage.local.get(STORAGE_ID);
-  if (!activeRecipeId) {
-    refreshUI();
-    return;
-  }
-  runSave({ recipeId: activeRecipeId });
-});
-
-document.getElementById("btn-create-new").addEventListener("click", async () => {
-  await chrome.storage.local.remove([
-    STORAGE_ID,
-    STORAGE_TITLE,
-    STORAGE_COUNT,
-  ]);
-  document.getElementById("recipe-name").value = "";
-  showView("none");
-  setStatus("", "info");
-  document.getElementById("status").className = "";
 });
 
 document.getElementById("btn-view-recipe").addEventListener("click", async () => {
@@ -286,8 +330,10 @@ document.getElementById("btn-view-recipe").addEventListener("click", async () =>
   window.close();
 });
 
-document.getElementById("btn-continue-building").addEventListener("click", () => {
-  refreshUI();
-  setStatus("", "info");
-  document.getElementById("status").className = "";
+document.getElementById("btn-add-another").addEventListener("click", async () => {
+  showView("main");
+  document.getElementById("recipe-name").value = "";
+  await loadRecipesAndRender();
 });
+
+loadRecipesAndRender();
