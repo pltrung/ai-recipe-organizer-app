@@ -13,9 +13,12 @@ const BROWSER_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
+/** Recipe blogs often load slowly (ads, images). Use 60s to reduce timeout drafts. */
+const FETCH_TIMEOUT_MS = 60000;
+
 const FETCH_OPTS = {
   headers: BROWSER_HEADERS,
-  signal: AbortSignal.timeout(30000),
+  signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 };
 
 /** Strong signals only — never block large HTML pages */
@@ -397,7 +400,13 @@ export async function extractWebsite(url: string): Promise<WebsiteExtractResult>
       recipeFromJsonLd: null,
     };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Fetch failed";
+    const raw = e instanceof Error ? e.message : "Fetch failed";
+    const isTimeout =
+      (e instanceof Error && e.name === "TimeoutError") ||
+      /timeout|aborted/i.test(raw);
+    const msg = isTimeout
+      ? "Request timed out — the page took too long to load. Try again or add the link later."
+      : raw;
     debug.preview = html.slice(0, 500);
     console.log("[extract] ---- SOURCE END (error):", msg, "----");
     return {
