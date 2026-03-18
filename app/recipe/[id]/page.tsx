@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabaseClient";
 import { RecipeView } from "@/components/RecipeView";
+import { RecipeUpdatedModal } from "@/components/RecipeUpdatedModal";
 import { recipeFromDbRow } from "@/lib/parseRecipeFromDb";
 import type { Recipe } from "@/lib/types";
 
@@ -23,10 +24,10 @@ export default async function RecipePage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ from_reel?: string }>;
+  searchParams: Promise<{ from_reel?: string; updated?: string }>;
 }) {
   const { id } = await params;
-  const { from_reel } = await searchParams;
+  const { from_reel, updated } = await searchParams;
   const recipe = await getRecipe(id);
   if (!recipe) notFound();
 
@@ -48,6 +49,10 @@ export default async function RecipePage({
         </div>
       </header>
       <main className="mx-auto max-w-2xl px-4 py-10">
+        <RecipeUpdatedModal
+          lastDiff={recipe.last_diff}
+          openWhenPresent={updated != null && updated !== ""}
+        />
         {from_reel === "1" && (
           <p className="mb-6 rounded-xl bg-amber-50 px-4 py-2 text-sm text-amber-800">
             We created this recipe from a short video. Edit ingredients and
@@ -58,6 +63,7 @@ export default async function RecipePage({
           recipe={recipe}
           sourceCount={sourceCount}
           needsUserInput={recipe.needs_user_input}
+          needsReview={recipe.needs_review}
         />
       </main>
     </div>

@@ -1,6 +1,6 @@
 # Recipe Cloud — Flow & architecture documentation
 
-This document describes how the app works end-to-end, with emphasis on **content extraction**, **Recipe Builder**, and **when OpenAI runs vs. when it is skipped**.
+This document describes how the app works end-to-end, with emphasis on **content extraction**, **full-corpus re-synthesis**, **Recipe Builder (extension)**, **recipe diffs**, and **when OpenAI runs**.
 
 ---
 
@@ -9,34 +9,64 @@ This document describes how the app works end-to-end, with emphasis on **content
 **Recipe Cloud** saves recipes by:
 
 - Pasting **one or more URLs** and/or **images** on **`/create`**.
-- Using the **Chrome extension** as a **Recipe Builder**: create a recipe from the current page, then **add more pages** to the same recipe while browsing.
+- Using the **Chrome extension** as a **Recipe Builder**: create from the current page, then **add more pages** to the same recipe.
 
-**Pipeline (web create):** per source → fetch/synthesize **`raw_text`** → structured recipe with **parsed ingredients** (often **JSON-LD only**, no AI) or **`extractRecipe` (OpenAI)** → collect successes → **merge** if 2+ → **Supabase**.  
-**Extension:** DOM text → **`/api/extract-from-extension`** → create or **merge into** an existing recipe.
+### Core idea: one chef pass on *all* raw text
 
-Design goals:
+Each recipe keeps a **parallel history**:
 
-- **Partial success:** URLs are processed with **`Promise.allSettled`**; one failure does not abort others.
-- **Success if partial:** a source counts as **success** if it has **ingredients *or* steps** (not both required).
-- **No dead end:** if **every** source fails structurally, **`/api/recipes/create`** still inserts a **draft** row (`needs_user_input`, empty lists, `raw_text` when available) so the user can proceed.
-- **JSON-LD first:** many blogs expose `Recipe` in **`application/ld+json`**; the server builds title/ingredients/steps **directly from schema** and **skips OpenAI** for that URL when structured data exists.
-- **Structured ingredients + scaling:** each ingredient is stored as **`{ quantity, unit, name, original }`** (with **`servings_base`** on the row). The recipe page rescales quantities **in the browser** (no API) when the user changes servings.
+| Field | Role |
+|-------|------|
+| **`sources[]`** | Label per capture (usually URL or `image:N`) |
+| **`raw_texts[]`** | Raw text captured for that source (same length as `sources`) |
+
+**Combined corpus:** `raw_texts.join("\n\n---\n\n")` (constant `RAW_TEXT_JOINER` in `recipeSourceHistory.ts`).
+
+**Primary synthesis:** **`synthesizeRecipeFromCombinedRaw(combinedText, …)`** (`recipeSynthesis.ts`) — one JSON recipe from the **entire** corpus (ingredients core/optional, substitutions, structured steps, tips, mistakes, techniques). **Not** incremental merge of “old row + last page only.”
+
+**Legacy rows** without `raw_texts`: **`hydrateRecipeSourceHistory`** treats legacy **`raw_text`** as a single chunk and aligns `sources` from **`source_urls`** where possible.
+
+### Web create (`POST /api/recipes/create`)
+
+1. Per URL/image: ingest → for each success, append **`historySources`** + **`historyRawTexts`** (raw from page, or **structured fallback text** from `ExtractedRecipe` if raw is thin).
+2. **Raw-only successes** (no structured recipe but have text): still get corpus rows; draft or **`synthesizeRecipeFromCombinedRaw`** only.
+3. **`combinedText = historyRawTexts.join(RAW_TEXT_JOINER)`** → **`synthesizeRecipeFromCombinedRaw`**.
+4. If corpus output is empty → **`mergeRecipesIntelligent(successfulRecipes)`** ( **`synthesizeRecipeFromVersions`** inside + fallbacks).
+5. Persist **`sources`**, **`raw_texts`**, **`needs_review`** when AI fallback used; draft when nothing usable.
+
+### Extension (`POST /api/extract-from-extension`)
+
+- **New recipe:** `sources = [url|platform]`, `raw_texts = [raw_text]` → same combined synthesis (or draft / `extractRecipe` fallback).
+- **Merge (`recipeId`):** append to **`sources`** / **`raw_texts`** → **full** re-synthesis from joined corpus → **overwrite** recipe fields on success.
+- **AI failure:** **do not** overwrite ingredients/steps/tips; still append history; set **`needs_review`**. UI shows a **needs review** banner.
+
+### Recipe diff (successful merge only)
+
+1. **`previousRecipe = recipeFromDbRow(row)`** (before update).
+2. **`nextRecipe`** from new synthesis payload.
+3. **`diffRecipes(prev, next)`** (`recipeDiff.ts`) — ingredients (normalized keys), core↔optional moves, steps (token Jaccard), tips/mistakes/techniques.
+4. **`summarizeRecipeDiffWithAi`** (`recipeDiffAi.ts`) + heuristic fallback → **`last_diff`** saved on row; **`versions[]`** prepends a compact entry (max **10**).
+5. Extension: **“Recipe updated”** modal. Web: **`RecipeUpdatedModal`** when opening **`/recipe/[id]?updated=…`**. Recipe page: collapsible **Source update history**.
 
 ---
 
 ## 2. Tech stack (reference)
 
-| Layer        | Technology                          |
-|-------------|-------------------------------------|
-| Web app     | Next.js 14 (App Router), TypeScript |
-| Styling     | TailwindCSS                         |
-| Database    | Supabase (Postgres + optional Auth) |
-| Ingredient math | `lib/ingredientParser.ts`, `lib/ingredientScale.ts` (parse, `roundSmart`, scale) |
-| AI          | OpenAI API (`gpt-4o-mini`)          |
-| Blog HTML   | Cheerio, Mozilla Readability, JSDOM |
-| YouTube     | `youtube-transcript` + page HTML    |
-| Extension   | Chrome MV3 (popup + options)        |
-| Deploy      | Vercel (typical)                    |
+| Layer | Technology |
+|-------|------------|
+| Web app | Next.js 14 (App Router), TypeScript |
+| Styling | TailwindCSS |
+| Database | Supabase (Postgres) |
+| Ingredient math | `ingredientParser.ts`, `ingredientScale.ts` |
+| **Corpus synthesis** | **`recipeSynthesis.ts`** — **`synthesizeRecipeFromCombinedRaw`** (+ **`synthesizeRecipeFromVersions`** for structured multi-version path) |
+| Source history | **`recipeSourceHistory.ts`** — hydrate / joiner |
+| **Recipe diff** | **`recipeDiff.ts`**, **`recipeDiffAi.ts`** |
+| Structured steps | **`structuredSteps.ts`** |
+| Merge / fallback | **`aiMerge.ts`** — synthesis + chef + overlap fallback |
+| AI | OpenAI (`gpt-4o-mini`) |
+| Blog HTML | Cheerio, Readability, JSDOM |
+| Extension | Chrome MV3 |
+| Deploy | Vercel (typical) |
 
 ---
 
@@ -44,309 +74,205 @@ Design goals:
 
 ### 3.1 Web: Create recipe (`/create`)
 
-1. User adds **URLs** (multi-link) and/or **images**.
-2. Optional **dish name** (title hint).
-3. **Create Recipe** → **`POST /api/recipes/create`** runs **all URL and image ingests in parallel** (`Promise.allSettled`), then merges successful extractions.
-4. **Success (≥1 structured source):** **“We extracted X of Y sources”** + per-source ✓/✗, optional **ingredient/step counts**, **Open recipe**.
-5. **All sources failed structurally:** response still includes **`id`** (**draft**), **`is_draft: true`**, **`sources[]`** with debug fields — UI shows **“Draft saved”** and user can open the recipe or add content later (not a hard 422 block).
+1. User adds URLs and/or images; optional dish name.
+2. **`POST /api/recipes/create`** — parallel ingest (`Promise.allSettled`).
+3. **Success:** corpus synthesis first; response includes **`id`**, source reports, counts.
+4. **Draft:** no structured success and corpus synthesis didn’t produce a full recipe — still returns **`id`**, **`is_draft: true`** when applicable.
 
 ### 3.2 Web: Dashboard (`/dashboard`)
 
-- **“Your saved recipes”** — list ordered by **`updated_at`** (fallback `created_at`).
-- Each card: **title**, **source count**, **last updated** date.
+- **`updated_at` DESC**; delete → **`DELETE /api/recipes/[id]`** + **`revalidatePath('/dashboard')`**.
 
 ### 3.3 Web: Recipe view (`/recipe/[id]`)
 
-- **Ingredients:** **Core** (cross-source) vs **Optional** (single-source). Stored as structured objects: **`quantity`**, **`unit`**, **`name`**, **`original`** (fallback line). Legacy string rows are parsed on read.
-- **Servings & scaling:** Column **`servings_base`** (default 1) is the numeric base; header shows human **`servings`**. **Adjust servings** (− / +) rescales ingredient quantities client-side with **`roundSmart`**. Toggle **Show scaled** vs **Show original**; optional **2 lb → 10 lb** hint when scaled.
-- **Steps:** numbered list (merged / rewritten when multi-source).  
-- **Tips:** bottom section when **`tips[]`** non-empty.  
-- Draft / empty banner when **`needs_user_input`** or no content.  
-- Optional **`?from_reel=1`** banner.
+- Core / optional ingredients, substitutions, structured steps, tips, mistakes, techniques, scaling.
+- **`needs_user_input`:** draft CTA.
+- **`needs_review`:** banner when a new source was stored but re-synthesis failed.
+- **`last_diff`:** modal when URL has **`?updated=`** (e.g. from extension “View recipe”).
+- **`versions[]`:** **Source update history** (summaries per merge).
 
-### 3.4 Chrome extension (Recipe Builder)
+### 3.4 Chrome extension
 
-**On popup open:** `GET /api/recipes?limit=5` loads recent recipes for the picker.
+**Storage:** active recipe id/title/source count.
 
-**Storage (`chrome.storage.local`):** `activeRecipeId`, `activeRecipeTitle`, source count — updated after every successful add (the recipe you added to becomes active).
+**Flow:** pick target → **Add this page** → **`POST /api/extract-from-extension`**.
 
-**UI — Add this page to:**
+| After merge success | UI |
+|---------------------|-----|
+| **`last_diff` present | **Recipe updated** screen (summary, insights, ingredient/step bullets) → **Continue** → success view |
+| Always | **View recipe** opens **`/recipe/{id}?updated={timestamp}`** (cache-bust) |
 
-- **Current recipe** (if an active recipe is set)
-- **Recent recipes** (up to 5, with source counts)
-- **Create new recipe** (+ optional name field)
-
-One **Add this page** button. Payload always includes `recipeId` when merging into an existing row; omit `recipeId` only for **Create new**.
-
-| After save | UI |
-|------------|-----|
-| Success | **Added to [title]**, recipe updated, **View recipe**, **Add another source** (returns to picker) |
-
-**DOM capture (injected):** `p`, `span`, **`li`**, `h1`–`h3`, `div[role="article"]`; exclude nav/footer; **visible nodes only**; each chunk **40–500** characters; dedupe; concatenate, **cap 5000** chars. If too little: looser chunks, then **`body.innerText`** slice to 5000 so **`raw_text` is rarely empty**.
-
-**API:** `POST /api/extract-from-extension`  
-**Body:** `{ raw_text, source_url, platform, recipeId? , recipe_name? }`
-
-- **No `recipeId`:** insert new recipe (draft if `raw_text` very short).
-- **With `recipeId`:** load row, append source URL, **`mergeRecipesIntelligent`** when text is long enough; update row (**`servings_base`** unchanged on merge).
+**Capture:** visible text from article-like nodes; cap ~5000 chars; **`raw_text`**, **`source_url`**, **`platform`**.
 
 ---
 
-## 4. Link classification (routing)
+## 4. Link classification (`lib/classifyLink.ts`)
 
-**`classifyLink(url)`** (`lib/classifyLink.ts`):
-
-| Platform      | Strategy        |
-|---------------|-----------------|
-| YouTube       | `youtube`       |
+| Platform | Strategy |
+|----------|----------|
+| YouTube | `youtube` |
 | TikTok, IG, FB, XHS | `reel_fallback` |
-| **Default**   | **`html_parse`**|
+| Default | `html_parse` |
 
 ---
 
-## 5. Backend: fetching & structured output by content type
+## 5. Per-source extraction (websites, YouTube, reels, images)
 
-A source ends as **`ExtractedRecipe`**: **title**, **`ingredients[]`** (each item **`StructuredIngredient`**: `quantity` | null, `unit`, `name`, `original`), **`steps[]`**, **`servings`** (display string), **`servings_base`** (positive integer, default **1**), plus **description** / **estimated_time** where available.
-
-**Success rule:** **`ingredients.length > 0 || steps.length > 0`**. Never require both.
+Same as before: **`ExtractedRecipe`** with **`StructuredIngredient`**; JSON-LD bypass on blogs when schema is complete. See **`websiteExtract.ts`**, **`sourcePipeline.ts`**, **`aiExtractor.ts`**. Success when **ingredients OR steps** (or raw text for corpus-only path on create).
 
 ---
 
-### 5.1 Websites / blogs (`html_parse`)
+## 6. Corpus synthesis & fallbacks
 
-**Module:** `lib/websiteExtract.ts`
+### 6.1 `synthesizeRecipeFromCombinedRaw` (primary for full history)
 
-1. **Fetch** — Browser-like **User-Agent**, **~30s** timeout.
-2. **Challenge pages** — Only when **HTML length &lt; ~2000** **and** body matches strong signals (**`cf-browser-verification`**, **`challenge-form`**, **`cdn-cgi/.../challenge`**). **Large HTML is never discarded** as “challenge only.”
-3. **Short body + HTTP error** — Fail if body &lt; 2000. Otherwise continue parsing.
-4. **JSON-LD `Recipe` (highest priority)**  
-   - Every `<script type="application/ld+json">` parsed; **deep walk** (`@graph`, **`mainEntity`**, nested objects) to find **`@type` Recipe**.  
-   - Best node chosen by score (ingredient/step counts).  
-   - **`recipeIngredient`**, **`recipeInstructions`** (strings, **HowToStep**, **itemListElement**, etc.) → **arrays**.  
-   - Each ingredient string is passed through **`parseIngredientLine`** → structured **`{ quantity, unit, name, original }`** (ranges / “to taste” / mixed units stay unscaled with **`original`**).  
-   - **`recipeYield`** → **`servings`** label + **`servings_base`** (first number parsed, else **1**).  
-   - **`scanJsonLdRecipes`** returns **`raw_text`** (human-readable) + **`ExtractedRecipe`**.  
-   - If **ingredients or steps** exist → pipeline sets **`recipeFromJsonLd`** → **`ingestUrl` succeeds without calling OpenAI** (`from_json_ld: true` on report).
-5. **No usable JSON-LD** — **Readability** + **Cheerio** headings matching **ingredients | instructions | directions | method | how to make | recipe | preparation | steps** + main/article/entry-content + **body fallback** if needed; combined, **~50k** cap.
+- **Input:** single string = all **`raw_texts`** joined by **`\n\n---\n\n`**.
+- **Output:** same JSON shape as version synthesis (core/optional/substitutions/steps/tips/mistakes/techniques/servings).
+- **Quality gate:** retry if output empty but input is substantial.
 
-**Logging:** `[extract]` — URL, HTML length/preview, clean length/preview, JSON-LD ingredient/step counts and whether OpenAI is bypassed.
+### 6.2 `synthesizeRecipeFromVersions` + `mergeRecipesIntelligent`
 
----
+Used when:
 
-### 5.2 YouTube (`youtube`)
+- Create path: corpus synthesis returns empty structured recipe → fallback on **`ExtractedRecipeWithConfidence[]`**.
+- Legacy **`/api/merge`** and internal chef path.
 
-**`lib/extractionStrategies.ts` → `strategyYoutube`**
+### 6.3 `mergedOutputToDbRow` / `synthesisPayloadToMerged`
 
-Transcript → else page **`shortDescription`**, **og:title**, meta description → else **placeholder** instructing inference. Feeds **`extractRecipe`** when used from **`ingestUrl`**.
+Maps synthesis output → DB columns.
 
 ---
 
-### 5.3 Reels / social (`reel_fallback`)
+## 7. Extension API — merge algorithm (detailed)
 
-Placeholder **`raw_text`** only; **OpenAI** tries to infer steps/ingredients. **Low** confidence.
+**`POST /api/extract-from-extension`**
 
----
+| Body field | Role |
+|------------|------|
+| `raw_text`, `source_url`, `platform` | New capture |
+| `recipeId` | Merge into existing row |
+| `recipe_name` | New recipe title hint |
 
-### 5.4 Images
+**Merge steps:**
 
-**Vision** → plain text → **`extractRecipe`** for normalized JSON.
+1. Load row; **`mergeSources`** updates **`source_urls`** / **`source_platforms`** (unique URLs).
+2. **`hydrateRecipeSourceHistory(row)`** → append new label + **`raw_text`** to **`sources`** / **`raw_texts`**.
+3. **`combinedText = raw_texts.join(RAW_TEXT_JOINER)`** (truncated safely for DB).
+4. **`synthesizeRecipeFromCombinedRaw`**.
+5. **Success:** UPDATE all recipe fields + **`sources`**, **`raw_texts`**, **`raw_text`**, **`needs_review: false`**, compute **`diffRecipes` + AI summary** → **`last_diff`**, push **`versions`**, **`updated_at`**.
+6. **Failure:** UPDATE only **`sources`**, **`raw_texts`**, **`raw_text`**, URLs/platforms, **`needs_review: true`** — **ingredients/steps/tips unchanged**.
 
----
-
-### 5.5 OpenAI extraction (`extractRecipe`)
-
-**Module:** `lib/aiExtractor.ts`
-
-- **System:** instructs structured JSON with numeric quantities where possible.
-- **User:** strict JSON **`{ title, servings (number), ingredients[], steps[] }`**. Each ingredient object: **`quantity`** (number or null), **`unit`**, **`name`**, **`original`** (full line). Ranges / unparseable lines → **`quantity: null`**, preserve **`original`**.
-- **`servings_base`:** from model **`servings`** if valid; else **1**. Display **`servings`** string via **`servingsDisplayLabel(servings_base)`**.
-- **`JSON.parse`** in **try/catch**; **`coerceStructuredIngredient`** normalizes each item (AI objects or legacy strings).
-- **Heuristics (no key or fallback):** bullet lines and measure-like lines → **`parseIngredientLine`** (`lib/ingredientParser.ts`): fractions **`1/2`**, **`1 1/2`**, unicode ½, units (**cup, tbsp, tsp, lb, g, ml, …**). **“To taste”**, **1–2 tbsp**-style ranges, **two measures in one line** → no numeric scale; show **`original`**.
-- **Last resort:** paragraph split → numbered steps so long **`raw_text`** rarely yields both arrays empty.
-- **Logs:** **`[OpenAI] FULL RAW RESPONSE:`** (full message body before parse).
-
-**No API key:** heuristics + last resort only.
+**Logging:** source count before/after, **`combinedLen`**, short AI outcome line.
 
 ---
 
-## 6. Per-source pipeline (`lib/sourcePipeline.ts`)
-
-**Used by:** `POST /api/recipes/create` (via **`Promise.allSettled`** per URL and per image).
-
-For each **URL**:
-
-1. **`classifyLink`** → strategy.  
-2. **`html_parse`:** **`extractWebsite`**. If **`recipeFromJsonLd`** has content → **return success immediately** (no OpenAI). Else **`extractRecipe(raw_text)`**.  
-3. **YouTube / reel:** build **`raw_text`** → **`extractRecipe`**.  
-4. **`SourceExtractionReport`:** `source_url`, `platform`, `status`, `confidence`, **`ingredients_count`**, **`steps_count`**, **`from_json_ld?`**, **`raw_text`** preview (~500), `error?`.
-
-**Images:** Vision → **`extractRecipe`**.
-
-**Logs:** **`[pipeline]`** — source URL, raw length + preview, parsed counts; JSON-LD branch logs OpenAI bypass.
-
----
-
-## 7. Intelligent merge & save (`lib/aiMerge.ts` + `POST /api/recipes/create`)
-
-**`mergeRecipesIntelligent(sources)`** builds the final stored recipe:
-
-1. **Ingredients (`recipeIngredients.ts`)**  
-   - Items are **`StructuredIngredient`** (or coerced from strings).  
-   - **Normalize key** from **`name` / `original`** (strip quantities/units for overlap).  
-   - **2+ sources:** same key in **≥2 sources** → **`core`**; **1 source only** → **`optional`**.  
-   - **1 source:** deduped by key → all → **`core`**, **`optional`** empty.  
-   - On duplicate key, keep the richer line (e.g. has **`quantity`**) / higher-confidence source.
-
-2. **Steps (not a blind array merge)**  
-   - All per-source steps are combined into one **labeled text block** (source index + confidence + title).  
-   - **OpenAI** rewrites into a single ordered **`steps[]`**: dedupe, clear instructions, section headings turned into real steps.  
-   - If the API fails or no key: **deduped concat** fallback.
-
-3. **Tips**  
-   - Same OpenAI pass returns **`tips[]`**: repeated techniques → important tips; unique helpful notes → enhancements.  
-   - Single-source saves: **`tips`** usually empty.
-
-4. **Servings base for merge**  
-   - **`servings_base`** on merged output = **max** of sources’ **`servings_base`** (each ≥ 1).  
-   - **`servings`** string labels that base (e.g. **“4 servings”**).
-
-**Stored shape (DB row — relevant fields):**
-
-```json
-{
-  "title": "...",
-  "description": "...",
-  "ingredients": {
-    "core": [
-      { "quantity": 2, "unit": "lb", "name": "beef shank", "original": "2 lb beef shank" }
-    ],
-    "optional": []
-  },
-  "steps": ["..."],
-  "tips": ["..."],
-  "estimated_time": "...",
-  "servings": "4 servings",
-  "servings_base": 4
-}
-```
-
-**Recipe page scaling (client only):** **`scaleIngredients(list, servings_base, targetServings)`** in **`lib/ingredientScale.ts`** — **`roundSmart`** on scaled amounts. Unparseable lines (**`quantity` null**) always display **`original`**. Not persisted when the user moves the servings slider.
-
-| Successful sources | Action |
-|--------------------|--------|
-| **0** | Draft row: empty **`core`/`optional`**, **`tips: []`**. |
-| **≥ 1** | **`mergeRecipesIntelligent`** (1 source = structured single recipe; 2+ = full merge). |
-
-**Legacy rows:** flat **`ingredients` array** of strings → read as **`{ core: [...parsed], optional: [] }`**. String **`core`/`optional`** entries → **`coerceStructuredIngredient`** / **`parseIngredientLine`** on read (`parseRecipeFromDb.ts`). **`servings_base`:** column if present; else inferred from **`servings`** text; else **1**.
-
-**Response (success):** `id`, `from_reel`, `sources[]`, `extracted_count`, `total_count`, optional **`is_draft`**.
-
----
-
-## 8. Extension API (`POST /api/extract-from-extension`)
-
-| Field | Role |
-|-------|------|
-| `raw_text` | DOM capture from extension |
-| `source_url`, `platform` | Provenance |
-| `recipeId` | If set → **merge** into existing row |
-| `recipe_name` | Optional title for **new** recipe |
-
-Weak **`raw_text`** → draft row; merge path appends sources and runs **`mergeRecipesIntelligent`** (same core/optional/steps/tips pipeline).
-
-**Merge into existing (`recipeId`):** **`servings_base`** and **`servings`** on the row are **preserved** after update so the user’s scaling baseline does not jump when new sources are added; merged ingredient quantities reflect the combined content.
-
----
-
-## 9. Other API routes
+## 8. Other API routes
 
 | Route | Role |
 |-------|------|
-| `GET /api/recipes?limit=5` | Recent recipes for extension picker (`id`, `title`, `source_count`, `updated_at`). CORS enabled. |
-| `DELETE /api/recipes/[id]` | Delete recipe (dashboard + extension-capable). CORS enabled. |
-| `POST /api/recipes/create` | Multi-URL/image create (parallel ingest, merge/draft). |
-| `POST /api/extract-from-extension` | Extension create or **merge into** `recipeId` (never creates when `recipeId` set). CORS + OPTIONS. |
-| `POST /api/extract` | Single-URL debug extract. |
-| `POST /api/merge` | Merge recipe JSON array. Incoming recipes may use **string[]** or structured **`ingredients`**; normalized before merge. |
+| `GET /api/recipes?limit=5` | Extension picker |
+| `DELETE /api/recipes/[id]` | Delete |
+| `POST /api/recipes/create` | Multi-source create (corpus-first) |
+| `POST /api/extract-from-extension` | Extension create/merge; response may include **`last_diff`**, **`recipe`**, **`synthesisFailed`** |
+| `POST /api/extract` | Debug single URL |
+| `POST /api/merge` | JSON array merge (structured merge path) |
 
 ---
 
-## 10. Database (`recipes`)
+## 9. Database (`recipes`)
 
-- **`ingredients`** (jsonb): **`{ "core": [...], "optional": [...] }`** where each element is ideally **`{ quantity, unit, name, original }`**. Legacy **string[]** or flat array still supported on read.  
-- **`steps`** (jsonb): string array.  
-- **`tips`** (jsonb): string array — merge insights / enhancements.  
-- **`servings_base`** (numeric): default **1** — numeric base for UI ingredient scaling.  
-- Plus: `title`, `description`, `estimated_time`, **`servings`** (human label), **`source_urls`**, **`source_platforms`**, **`raw_text`**, **`created_at`**, **`needs_user_input`**, **`updated_at`**.
+| Column | Role |
+|--------|------|
+| **`ingredients`** | `{ core[], optional[] }` — `StructuredIngredient` |
+| **`steps`** | `RecipeStep[]` |
+| **`tips`**, **`mistakes`**, **`techniques`** | string[] |
+| **`substitutions`** | `{ original, alternatives[] }[]` |
+| **`servings`**, **`servings_base`** | Display + scale base |
+| **`source_urls`**, **`source_platforms`** | Provenance (URLs unique in merge helper) |
+| **`raw_text`** | Legacy / combined blob mirror (large cap) |
+| **`sources`**, **`raw_texts`** | **Parallel capture history** (jsonb arrays) |
+| **`needs_user_input`** | Draft / weak capture |
+| **`needs_review`** | New source saved; synthesis failed |
+| **`last_diff`** | Latest merge diff (structured + AI summary + bullet arrays) |
+| **`versions`** | Rolling history of merge summaries (max 10) |
+| **`created_at`**, **`updated_at`** | Timestamps |
 
-Migrations: **`20250318000000_recipe_builder.sql`**, **`20250319000000_recipe_tips_grouped_ingredients.sql`** (`tips`), **`20250320000000_servings_base.sql`** (**`servings_base`**).
+Apply migrations in order through **`recipe_last_diff`** (sources/raw_texts/needs_review in earlier migration).
 
 ---
 
-## 11. Environment variables
+## 10. Environment variables
 
-- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`  
-- `OPENAI_API_KEY`  
-
-Extension must target a reachable app URL (options + optional host permission).
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `OPENAI_API_KEY`
 
 ---
 
-## 12. Debugging (server logs)
+## 11. Debugging (server logs)
 
 | Prefix | Meaning |
 |--------|---------|
-| `[extract]` | Website fetch + JSON-LD / clean text |
-| `[pipeline]` | Per-source ingest, raw preview, final parsed counts |
-| `[OpenAI]` | Full model JSON string before parse |
-
-Smoke test (blogs): **`npm run test:blogs`** (`scripts/quick-extract-test.ts` — logs ingredient/step counts; structured ingredients in AI path).
+| `[extract]` | Website fetch / JSON-LD |
+| `[pipeline]` | Per-source ingest |
+| `[OpenAI]` | Extract JSON |
+| `[synthesis]` | `synthesizeRecipeFromVersions` errors |
+| **`[synthesis-from-raw]`** | **`synthesizeRecipeFromCombinedRaw`** errors |
+| **`[recipeDiffAi]`** | AI diff errors |
+| **`[extract-from-extension]`** | Merge / corpus / diff |
+| `[merge]` | Chef / fallback merge |
 
 ---
 
-## 13. Mental model (diagram)
+## 12. Mental model (diagrams)
+
+### Web create
 
 ```text
 URLs + images
       │
       ▼
-┌─────────────────────────────────────┐
-│ Promise.allSettled (per URL / image) │
-└─────────────────────────────────────┘
+Promise.allSettled → per source: raw + optional ExtractedRecipe
       │
       ▼
-classifyLink → html_parse | youtube | reel_fallback | image
+historySources[] + historyRawTexts[]  (parallel)
+      │
+      ├─► 0 usable chunks ──► DRAFT (+ partial raw if any)
+      └─► ≥1 chunk
+              │
+              ▼
+      combinedText = join(raw_texts, "---")
+              │
+              ▼
+      synthesizeRecipeFromCombinedRaw
+              │
+              ├─► good JSON ──► save + sources/raw_texts
+              └─► empty / fail ──► mergeRecipesIntelligent(structured versions)
       │
       ▼
-html_parse: extractWebsite
-      │
-      ├─► JSON-LD Recipe with ing/steps? ──► structured recipe (NO OpenAI)
-      │
-      └─► else raw_text ──► extractRecipe (OpenAI + heuristics)
-      │
-      ▼
-Collect successes (ing OR steps)
-      │
-      ├─► 0 ──► insert DRAFT + still return id
-      ├─► 1 ──► save
-      └─► 2+ ──► mergeRecipesIntelligent ──► save (+ servings_base)
-      │
-      ▼
-Supabase + UI (create summary / recipe / dashboard)
+Supabase
 ```
 
-**Extension parallel path:** DOM → **`extract-from-extension`** → new row or merge into **`activeRecipeId`**.
+### Extension merge
 
-**Recipe view:** load recipe → **Adjust servings** / **Show scaled | Show original** → client-side **`scaleIngredients`** only (no write).
+```text
+Existing row + new page capture
+      │
+      ▼
+sources.push / raw_texts.push
+      │
+      ▼
+combinedText ──► synthesizeRecipeFromCombinedRaw
+      │
+      ├─► OK ──► UPDATE full recipe + last_diff + versions
+      └─► FAIL ──► UPDATE history only + needs_review (keep old body)
+```
 
 ---
 
-## 14. Future-friendly (not fully built)
+## 13. Future-friendly
 
-- Stronger platform APIs (YouTube Data, oEmbed)  
-- Auth / RLS on `recipes`  
-- Mobile share targets, grocery lists  
+- Stronger platform APIs, Auth / RLS, mobile share, grocery lists
 
 ---
 
-*Last updated: structured ingredients (`ingredientParser` / `coerceStructuredIngredient`), **`servings_base`** + client scaling (`ingredientScale`), merge dedupe on structured rows, extension merge preserves servings baseline, DB migration **`20250320000000_servings_base`**, merge API normalization.*
+*Last updated: **corpus-first synthesis** (`synthesizeRecipeFromCombinedRaw`); **`sources` / `raw_texts`** history; extension **failure safety** (`needs_review`); **recipe diff** (`last_diff`, `versions`); extension **Recipe updated** modal + web **`?updated=`** modal; docs aligned with `recipeSourceHistory`, `recipeDiff`, `recipeDiffAi`.*

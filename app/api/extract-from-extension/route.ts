@@ -3,12 +3,27 @@ import { createServerClient } from "@/lib/supabaseServer";
 import { detectPlatform } from "@/lib/platformDetector";
 import { extractRecipe } from "@/lib/aiExtractor";
 import {
-  mergeRecipesIntelligent,
   mergedOutputToDbRow,
+  synthesisPayloadToMerged,
 } from "@/lib/aiMerge";
 import { recipeFromDbRow } from "@/lib/parseRecipeFromDb";
-import type { ExtractedRecipeWithConfidence } from "@/lib/types";
+import {
+  finalizeStructuredSteps,
+  fallbackStructuredSteps,
+} from "@/lib/structuredSteps";
 import { EXTENSION_CORS_HEADERS } from "@/lib/extensionCors";
+import { synthesizeRecipeFromCombinedRaw } from "@/lib/recipeSynthesis";
+import {
+  hydrateRecipeSourceHistory,
+  RAW_TEXT_JOINER,
+  asStringArray,
+} from "@/lib/recipeSourceHistory";
+import { diffRecipes } from "@/lib/recipeDiff";
+import {
+  summarizeRecipeDiffWithAi,
+  heuristicDiffSummary,
+} from "@/lib/recipeDiffAi";
+import type { Recipe } from "@/lib/types";
 
 const WEAK_RAW_LEN = 200;
 
@@ -21,11 +36,6 @@ function json(data: object, init?: ResponseInit) {
     ...init,
     headers: { ...EXTENSION_CORS_HEADERS, ...(init?.headers as object) },
   });
-}
-
-function asStringArray(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.map((x) => String(x).trim()).filter(Boolean);
 }
 
 function mergeSources(
@@ -44,29 +54,30 @@ function mergeSources(
   return { urls, plats };
 }
 
-function rowToMergeSource(
-  row: Record<string, unknown>
-): ExtractedRecipeWithConfidence {
+function fullRecipeFromRow(row: Record<string, unknown>) {
   const r = recipeFromDbRow(row);
-  const flat = [...r.ingredients.core, ...r.ingredients.optional];
-  const legacy = asStringArray(row.ingredients);
   return {
-    title: r.title || "Recipe",
+    id: r.id,
+    title: r.title,
     description: r.description,
-    ingredients:
-      flat.length > 0
-        ? flat
-        : legacy.map((s) => ({
-            quantity: null as number | null,
-            unit: "",
-            name: s,
-            original: s,
-          })),
-    steps: asStringArray(row.steps),
-    estimated_time: r.estimated_time || "—",
+    ingredients: r.ingredients,
+    steps: r.steps,
+    tips: r.tips,
+    substitutions: r.substitutions,
+    mistakes: r.mistakes,
+    techniques: r.techniques,
+    estimated_time: r.estimated_time,
     servings: r.servings,
     servings_base: r.servings_base,
-    confidence: "high",
+    source_urls: r.source_urls,
+    source_platforms: r.source_platforms,
+    sources: r.sources ?? [],
+    raw_texts: r.raw_texts ?? [],
+    needs_user_input: Boolean(r.needs_user_input),
+    needs_review: Boolean(r.needs_review),
+    updated_at: row.updated_at ?? null,
+    last_diff: r.last_diff ?? null,
+    versions: r.versions ?? [],
   };
 }
 
@@ -92,7 +103,7 @@ export async function POST(req: NextRequest) {
     const recipeNameOpt =
       typeof body?.recipe_name === "string" ? body.recipe_name.trim() : "";
 
-    const openaiKey = process.env.OPENAI_API_KEY;
+    const openaiKey = process.env.OPENAI_API_KEY?.trim() || "";
     const supabase = createServerClient();
 
     const isWeak = rawText.length < WEAK_RAW_LEN;
@@ -111,8 +122,9 @@ export async function POST(req: NextRequest) {
         return json({ error: "Recipe not found" }, { status: 404 });
       }
 
-      const prevUrls = asStringArray(row.source_urls);
-      const prevPlats = asStringArray(row.source_platforms);
+      const rec = row as Record<string, unknown>;
+      const prevUrls = asStringArray(rec.source_urls);
+      const prevPlats = asStringArray(rec.source_platforms);
       const { urls: source_urls, plats: source_platforms } = mergeSources(
         prevUrls,
         prevPlats,
@@ -120,130 +132,325 @@ export async function POST(req: NextRequest) {
         plat
       );
 
-      const separator = row.raw_text
-        ? `\n\n---\n${sourceUrl || "source"}\n---\n\n`
-        : "";
-      const rawCombined = `${row.raw_text ?? ""}${separator}${rawText}`.slice(
-        0,
-        500_000
+      const { sources: srcHist, raw_texts: rawHist } =
+        hydrateRecipeSourceHistory(rec);
+      const sourcesBefore = rawHist.length;
+      const newSourceLabel = sourceUrl || plat || "unknown";
+      const nextSources = [...srcHist, newSourceLabel];
+      const nextRawTexts = [...rawHist, rawText];
+      const sourcesAfter = nextRawTexts.length;
+      const combinedText = nextRawTexts.join(RAW_TEXT_JOINER).slice(0, 500_000);
+
+      console.log(
+        `[extract-from-extension] merge recipeId=${recipeId} sourcesBefore=${sourcesBefore} sourcesAfter=${sourcesAfter} combinedLen=${combinedText.length}`
       );
 
-      /** Existing row + new page → mergeRecipesIntelligent (dedupe ingredients, rewrite steps, tips) */
-      const existing = rowToMergeSource(row);
-      let dbPayload = mergedOutputToDbRow(
-        (await mergeRecipesIntelligent([existing], openaiKey || ""))!
-      );
+      const fallbackTitle =
+        typeof rec.title === "string" && String(rec.title).trim()
+          ? String(rec.title).trim()
+          : "Recipe";
 
-      if (!isWeak) {
-        const newPart = await extractRecipe(rawText, openaiKey || "");
-        const hasNew =
-          newPart.ingredients.length > 0 || newPart.steps.length > 0;
-        if (hasNew) {
-          const newWithConf: ExtractedRecipeWithConfidence = {
-            ...newPart,
-            confidence: "medium",
-          };
-          const mergedOut = await mergeRecipesIntelligent(
-            [existing, newWithConf],
-            openaiKey || ""
+      let synthOk = false;
+      let dbPayload: ReturnType<typeof mergedOutputToDbRow> | null = null;
+
+      if (openaiKey && combinedText.trim().length > 0) {
+        try {
+          const synth = await synthesizeRecipeFromCombinedRaw(
+            combinedText,
+            openaiKey,
+            fallbackTitle
           );
-          if (mergedOut) dbPayload = mergedOutputToDbRow(mergedOut);
+          if (synth) {
+            const merged = synthesisPayloadToMerged(synth);
+            dbPayload = mergedOutputToDbRow(merged);
+            const ingTotal =
+              dbPayload.ingredients.core.length +
+              dbPayload.ingredients.optional.length;
+            if (ingTotal > 0 || dbPayload.steps.length > 0) {
+              synthOk = true;
+            }
+          }
+        } catch (e) {
+          console.error("[extract-from-extension] synthesis threw:", e);
         }
       }
 
-      const ingTotal =
-        dbPayload.ingredients.core.length +
-        dbPayload.ingredients.optional.length;
-      const needs_user_input =
-        ingTotal === 0 && dbPayload.steps.length === 0;
+      if (synthOk && dbPayload) {
+        const ingTotal =
+          dbPayload.ingredients.core.length +
+          dbPayload.ingredients.optional.length;
+        const needs_user_input =
+          ingTotal === 0 && dbPayload.steps.length === 0;
 
-      const preserved = recipeFromDbRow(row as Record<string, unknown>);
+        console.log(
+          `[extract-from-extension] AI ok title=${dbPayload.title.slice(0, 60)} coreIngs=${dbPayload.ingredients.core.length} steps=${dbPayload.steps.length} tips=${dbPayload.tips.length}`
+        );
 
-      const { error: upErr } = await supabase
-        .from("recipes")
-        .update({
+        const previousRecipe = recipeFromDbRow(rec);
+        const nextRecipe: Recipe = {
+          ...previousRecipe,
           title: dbPayload.title,
           description: dbPayload.description,
           ingredients: dbPayload.ingredients,
           steps: dbPayload.steps,
           tips: dbPayload.tips,
-          substitutions: dbPayload.substitutions,
+          substitutions: dbPayload.substitutions as Recipe["substitutions"],
+          mistakes: dbPayload.mistakes,
+          techniques: dbPayload.techniques,
           estimated_time: dbPayload.estimated_time,
-          servings: preserved.servings || dbPayload.servings,
-          servings_base: preserved.servings_base,
+          servings: dbPayload.servings,
+          servings_base: dbPayload.servings_base,
+        };
+        const structured = diffRecipes(previousRecipe, nextRecipe);
+        const aiPart =
+          (await summarizeRecipeDiffWithAi(
+            previousRecipe,
+            nextRecipe,
+            structured,
+            openaiKey
+          )) ?? heuristicDiffSummary(structured);
+        let ingredient_changes = [...aiPart.ingredient_changes];
+        let step_changes = [...aiPart.step_changes];
+        let new_insights = [...aiPart.new_insights];
+        if (!ingredient_changes.length) {
+          for (const x of structured.added_core.slice(0, 4)) {
+            ingredient_changes.push(`Added to core: ${x}`);
+          }
+          for (const x of structured.removed_core.slice(0, 3)) {
+            ingredient_changes.push(`Removed from core: ${x}`);
+          }
+          for (const x of structured.moved_optional_to_core.slice(0, 3)) {
+            ingredient_changes.push(`Promoted to core: ${x}`);
+          }
+        }
+        if (!step_changes.length) {
+          if (structured.steps_new.length) {
+            step_changes.push(
+              `${structured.steps_new.length} new step(s)`
+            );
+          }
+          if (structured.steps_modified.length) {
+            step_changes.push(
+              `${structured.steps_modified.length} step(s) clarified or reordered`
+            );
+          }
+        }
+        if (!new_insights.length) {
+          new_insights = heuristicDiffSummary(structured).new_insights;
+        }
+        const at = new Date().toISOString();
+        const last_diff = {
+          at,
+          source_count_after: sourcesAfter,
+          structured,
+          summary: aiPart.summary,
+          ingredient_changes: ingredient_changes.slice(0, 12),
+          step_changes: step_changes.slice(0, 10),
+          new_insights: new_insights.slice(0, 10),
+        };
+        const prevVer = Array.isArray(rec.versions) ? rec.versions : [];
+        const versionEntry = {
+          at,
+          source_count_after: sourcesAfter,
+          summary: last_diff.summary,
+          ingredient_changes: last_diff.ingredient_changes.slice(0, 6),
+          step_changes: last_diff.step_changes.slice(0, 6),
+          new_insights: last_diff.new_insights.slice(0, 6),
+        };
+        const versions = [versionEntry, ...prevVer].slice(0, 10);
+
+        const { error: upErr } = await supabase
+          .from("recipes")
+          .update({
+            title: dbPayload.title,
+            description: dbPayload.description,
+            ingredients: dbPayload.ingredients,
+            steps: dbPayload.steps,
+            tips: dbPayload.tips,
+            substitutions: dbPayload.substitutions,
+            mistakes: dbPayload.mistakes,
+            techniques: dbPayload.techniques,
+            estimated_time: dbPayload.estimated_time,
+            servings: dbPayload.servings,
+            servings_base: dbPayload.servings_base,
+            source_urls,
+            source_platforms,
+            sources: nextSources,
+            raw_texts: nextRawTexts,
+            raw_text: combinedText || null,
+            needs_user_input,
+            needs_review: false,
+            last_diff,
+            versions,
+            updated_at: at,
+          })
+          .eq("id", recipeId);
+
+        if (upErr) {
+          console.error("extract-from-extension update:", upErr);
+          return json({ error: "Failed to update recipe" }, { status: 500 });
+        }
+
+        const { data: fresh } = await supabase
+          .from("recipes")
+          .select("*")
+          .eq("id", recipeId)
+          .single();
+
+        return json({
+          recipeId,
+          title: dbPayload.title,
+          sourceCount: sourcesAfter,
+          merged: true,
+          synthesisFailed: false,
+          last_diff,
+          recipe: fresh ? fullRecipeFromRow(fresh as Record<string, unknown>) : null,
+        });
+      }
+
+      console.warn(
+        `[extract-from-extension] AI failed or skipped; appending source only, needs_review=true`
+      );
+
+      const { error: upErr } = await supabase
+        .from("recipes")
+        .update({
           source_urls,
           source_platforms,
-          raw_text: rawCombined || null,
-          needs_user_input,
+          sources: nextSources,
+          raw_texts: nextRawTexts,
+          raw_text: combinedText || null,
+          needs_review: true,
           updated_at: new Date().toISOString(),
         })
         .eq("id", recipeId);
 
       if (upErr) {
-        console.error("extract-from-extension update:", upErr);
+        console.error("extract-from-extension partial update:", upErr);
         return json({ error: "Failed to update recipe" }, { status: 500 });
       }
 
+      const { data: fresh } = await supabase
+        .from("recipes")
+        .select("*")
+        .eq("id", recipeId)
+        .single();
+
       return json({
         recipeId,
-        title: dbPayload.title,
-        sourceCount: Math.max(source_urls.length, 1),
+        title: fallbackTitle,
+        sourceCount: sourcesAfter,
         merged: true,
+        synthesisFailed: true,
+        recipe: fresh ? fullRecipeFromRow(fresh as Record<string, unknown>) : null,
       });
     }
 
-    let extracted: import("@/lib/types").ExtractedRecipe;
-    if (isWeak || !openaiKey) {
-      extracted = {
-        title: "Draft Recipe",
-        description: "",
-        ingredients: [],
-        steps: [],
-        estimated_time: "—",
-        servings: "1 serving",
-        servings_base: 1,
-      };
-    } else {
-      extracted = await extractRecipe(rawText, openaiKey);
-    }
-
-    const title = recipeNameOpt
-      ? recipeNameOpt
-      : isWeak
-        ? "Draft Recipe"
-        : extracted.title;
-
-    const needs_user_input =
-      isWeak ||
-      (extracted.ingredients.length === 0 && extracted.steps.length === 0);
-
+    /* New recipe */
+    const sources = [sourceUrl || plat || "website"];
+    const raw_texts = [rawText];
     const source_urls = sourceUrl ? [sourceUrl] : [];
     const source_platforms =
       source_urls.length > 0 ? [plat] : [platformFromClient || "website"];
 
-    const { data, error } = await supabase
-      .from("recipes")
-      .insert({
+    let insertRow: Record<string, unknown>;
+
+    if (isWeak || !openaiKey) {
+      const title = recipeNameOpt || "Draft Recipe";
+      insertRow = {
         user_id: null,
         title,
-        description: extracted.description,
-        ingredients: {
-          core: extracted.ingredients,
-          optional: [],
-        },
-        steps: extracted.steps,
+        description: "",
+        ingredients: { core: [], optional: [] },
+        steps: [] as object[],
         tips: [] as string[],
         substitutions: [] as string[],
-        estimated_time: extracted.estimated_time,
-        servings: extracted.servings,
-        servings_base: extracted.servings_base,
+        mistakes: [] as string[],
+        techniques: [] as string[],
+        estimated_time: "—",
+        servings: "1 serving",
+        servings_base: 1,
         source_urls,
         source_platforms,
+        sources,
+        raw_texts,
         raw_text: rawText || null,
-        needs_user_input,
+        needs_user_input: true,
+        needs_review: false,
         updated_at: new Date().toISOString(),
-      })
-      .select("id")
+      };
+    } else {
+      const synthNew = await synthesizeRecipeFromCombinedRaw(
+        rawText,
+        openaiKey,
+        recipeNameOpt || "Recipe"
+      );
+      if (synthNew) {
+        const dbPayload = mergedOutputToDbRow(synthesisPayloadToMerged(synthNew));
+        const ingTotal =
+          dbPayload.ingredients.core.length + dbPayload.ingredients.optional.length;
+        const needs = ingTotal === 0 && dbPayload.steps.length === 0;
+        insertRow = {
+          user_id: null,
+          title: recipeNameOpt || dbPayload.title,
+          description: dbPayload.description,
+          ingredients: dbPayload.ingredients,
+          steps: dbPayload.steps,
+          tips: dbPayload.tips,
+          substitutions: dbPayload.substitutions,
+          mistakes: dbPayload.mistakes,
+          techniques: dbPayload.techniques,
+          estimated_time: dbPayload.estimated_time,
+          servings: dbPayload.servings,
+          servings_base: dbPayload.servings_base,
+          source_urls,
+          source_platforms,
+          sources,
+          raw_texts,
+          raw_text: rawText || null,
+          needs_user_input: needs,
+          needs_review: false,
+          updated_at: new Date().toISOString(),
+        };
+      } else {
+        const extracted = await extractRecipe(rawText, openaiKey);
+        const title = recipeNameOpt || extracted.title;
+        const structuredSteps =
+          extracted.steps.length > 0
+            ? (await finalizeStructuredSteps(extracted.steps, openaiKey)) ??
+              fallbackStructuredSteps(extracted.steps)
+            : [];
+        const needs_user_input =
+          extracted.ingredients.length === 0 && extracted.steps.length === 0;
+        insertRow = {
+          user_id: null,
+          title,
+          description: extracted.description,
+          ingredients: { core: extracted.ingredients, optional: [] },
+          steps: structuredSteps,
+          tips: [] as string[],
+          substitutions: [] as string[],
+          mistakes: [] as string[],
+          techniques: [] as string[],
+          estimated_time: extracted.estimated_time,
+          servings: extracted.servings,
+          servings_base: extracted.servings_base,
+          source_urls,
+          source_platforms,
+          sources,
+          raw_texts,
+          raw_text: rawText || null,
+          needs_user_input,
+          needs_review: true,
+          updated_at: new Date().toISOString(),
+        };
+      }
+    }
+
+    const { data, error } = await supabase
+      .from("recipes")
+      .insert(insertRow)
+      .select("*")
       .single();
 
     if (error) {
@@ -251,11 +458,16 @@ export async function POST(req: NextRequest) {
       return json({ error: "Failed to save recipe" }, { status: 500 });
     }
 
+    const row = data as Record<string, unknown>;
+    const r = recipeFromDbRow(row);
+
     return json({
-      recipeId: data.id,
-      title,
+      recipeId: String(row.id),
+      title: r.title,
       sourceCount: Math.max(source_urls.length, 1),
       merged: false,
+      synthesisFailed: Boolean(row.needs_review),
+      recipe: fullRecipeFromRow(row),
     });
   } catch (e) {
     console.error("extract-from-extension error:", e);

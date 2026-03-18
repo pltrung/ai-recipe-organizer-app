@@ -1,8 +1,21 @@
-import type { ExtractedRecipe, ExtractedRecipeWithConfidence } from "./types";
+import type {
+  ExtractedRecipe,
+  ExtractedRecipeWithConfidence,
+  RecipeStep,
+  RecipeSubstitutionEntry,
+} from "./types";
 import type { StructuredIngredient } from "./types";
+import {
+  synthesizeRecipeFromVersions,
+  type SynthesisDbPayload,
+} from "./recipeSynthesis";
 import { groupIngredientsBySourceOverlap, buildCleanedIngredientLinesForChef } from "./recipeIngredients";
 import { parseIngredientLine } from "./ingredientParser";
 import { servingsDisplayLabel } from "./ingredientScale";
+import {
+  finalizeStructuredSteps,
+  fallbackStructuredSteps,
+} from "./structuredSteps";
 
 const MAX_CORE_INGREDIENTS = 20;
 const MAX_OPTIONAL_INGREDIENTS = 10;
@@ -15,9 +28,11 @@ export type MergedRecipeOutput = {
     core: StructuredIngredient[];
     optional: StructuredIngredient[];
   };
-  steps: string[];
+  steps: RecipeStep[];
   tips: string[];
-  substitutions: string[];
+  substitutionsDetailed: RecipeSubstitutionEntry[];
+  mistakes: string[];
+  techniques: string[];
   estimated_time: string;
   servings: string;
   servings_base: number;
@@ -84,6 +99,10 @@ type ChefRestructureResult = {
   steps: string[];
   tips: string[];
 };
+
+function stringsToSubstitutionEntries(lines: string[]): RecipeSubstitutionEntry[] {
+  return lines.map((s) => ({ original: s.trim(), alternatives: [] })).filter((x) => x.original);
+}
 
 async function chefRestructure(
   ingredientLines: string[],
@@ -201,10 +220,20 @@ function mergeServingsBase(sources: ExtractedRecipeWithConfidence[]): number {
   return Math.round(Math.max(...bases));
 }
 
+/** Final layer: structured beginner-friendly steps before save */
+async function applyFinalStructuredSteps(
+  stepLines: string[],
+  openaiApiKey: string
+): Promise<RecipeStep[]> {
+  const lines = stepLines.map((s) => s.trim()).filter(Boolean);
+  if (lines.length === 0) return [];
+  const ai = await finalizeStructuredSteps(lines, openaiApiKey);
+  if (ai && ai.length > 0) return ai;
+  return fallbackStructuredSteps(lines);
+}
+
 /**
- * Multi-source intelligent merge: send all data to OpenAI for chef-quality
- * restructure (dedupe, core/optional, substitutions, clean steps, tips).
- * Single source also runs through chef for consistent output.
+ * Full intelligent synthesis first; fallback to chef + structured steps.
  */
 export async function mergeRecipesIntelligent(
   sources: ExtractedRecipeWithConfidence[],
@@ -217,9 +246,35 @@ export async function mergeRecipesIntelligent(
     return order[a.confidence] - order[b.confidence];
   });
 
-  const servings_base = mergeServingsBase(ordered);
-  const sourceTitles = ordered.map((s) => s.title).filter(Boolean);
+  const servings_base_fallback = mergeServingsBase(ordered);
+  const hasAnySignal =
+    ordered.some((s) => s.ingredients.length > 0 || s.steps.length > 0);
 
+  if (hasAnySignal && openaiApiKey?.trim()) {
+    const synth = await synthesizeRecipeFromVersions(ordered, openaiApiKey);
+    if (synth) {
+      return {
+        title: synth.title,
+        description: ordered
+          .map((s) => s.description)
+          .filter(Boolean)
+          .slice(0, 2)
+          .join(" ")
+          .slice(0, 1500),
+        ingredients: synth.ingredients,
+        steps: synth.steps,
+        tips: synth.tips,
+        substitutionsDetailed: synth.substitutionsDetailed,
+        mistakes: synth.mistakes,
+        techniques: synth.techniques,
+        estimated_time: ordered[0].estimated_time || "—",
+        servings: synth.servings,
+        servings_base: synth.servings_base,
+      };
+    }
+  }
+
+  const sourceTitles = ordered.map((s) => s.title).filter(Boolean);
   const ingredientLines = buildCleanedIngredientLinesForChef(ordered);
   const stepsBlock = buildCombinedStepsBlock(ordered);
   const hasContent =
@@ -239,6 +294,14 @@ export async function mergeRecipesIntelligent(
         coreStructured,
         optionalStructured
       );
+      const stepLines =
+        chef.steps.length > 0
+          ? chef.steps
+          : fallbackStepsFromSources(ordered);
+      const steps = await applyFinalStructuredSteps(
+        stepLines,
+        openaiApiKey
+      );
       return {
         title: chef.title,
         description: ordered
@@ -248,19 +311,22 @@ export async function mergeRecipesIntelligent(
           .join(" ")
           .slice(0, 1500),
         ingredients: { core, optional },
-        steps: chef.steps.length > 0 ? chef.steps : fallbackStepsFromSources(ordered),
+        steps,
         tips: chef.tips,
-        substitutions: chef.substitutions,
+        substitutionsDetailed: stringsToSubstitutionEntries(chef.substitutions),
+        mistakes: [],
+        techniques: [],
         estimated_time: ordered[0].estimated_time || "—",
-        servings: servingsDisplayLabel(servings_base),
-        servings_base,
+        servings: servingsDisplayLabel(servings_base_fallback),
+        servings_base: servings_base_fallback,
       };
     }
   }
 
-  // Fallback: no API or chef failed — use overlap merge, no substitutions
   const ingredients = groupIngredientsBySourceOverlap(ordered);
-  const fallbackSteps = fallbackStepsFromSources(ordered);
+  const fbSteps = fallbackStepsFromSources(ordered);
+  const fallbackStepLines =
+    fbSteps.length > 0 ? fbSteps : ordered.flatMap((s) => s.steps).slice(0, 25);
   const title =
     ordered[0].title ||
     ordered.find((s) => s.title)?.title ||
@@ -268,6 +334,11 @@ export async function mergeRecipesIntelligent(
   const { core, optional } = applyIngredientLimits(
     ingredients.core,
     ingredients.optional
+  );
+
+  const steps = await applyFinalStructuredSteps(
+    fallbackStepLines,
+    openaiApiKey || ""
   );
 
   return {
@@ -279,15 +350,14 @@ export async function mergeRecipesIntelligent(
       .join(" ")
       .slice(0, 1500),
     ingredients: { core, optional },
-    steps:
-      fallbackSteps.length > 0
-        ? fallbackSteps
-        : ordered.flatMap((s) => s.steps).slice(0, 25),
+    steps,
     tips: [],
-    substitutions: [],
+    substitutionsDetailed: [],
+    mistakes: [],
+    techniques: [],
     estimated_time: ordered[0].estimated_time || "—",
-    servings: servingsDisplayLabel(servings_base),
-    servings_base,
+    servings: servingsDisplayLabel(servings_base_fallback),
+    servings_base: servings_base_fallback,
   };
 }
 
@@ -302,7 +372,7 @@ export async function mergeRecipesWithConfidence(
     title: m.title,
     description: m.description,
     ingredients: [...m.ingredients.core, ...m.ingredients.optional],
-    steps: m.steps,
+    steps: m.steps.map((st) => st.instructions),
     estimated_time: m.estimated_time,
     servings: m.servings,
     servings_base: m.servings_base,
@@ -325,10 +395,26 @@ export async function mergeRecipes(
     title: m.title,
     description: m.description,
     ingredients: [...m.ingredients.core, ...m.ingredients.optional],
-    steps: m.steps,
+    steps: m.steps.map((st) => st.instructions),
     estimated_time: m.estimated_time,
     servings: m.servings,
     servings_base: m.servings_base,
+  };
+}
+
+export function synthesisPayloadToMerged(p: SynthesisDbPayload): MergedRecipeOutput {
+  return {
+    title: p.title,
+    description: p.description,
+    ingredients: p.ingredients,
+    steps: p.steps,
+    tips: p.tips,
+    substitutionsDetailed: p.substitutionsDetailed,
+    mistakes: p.mistakes,
+    techniques: p.techniques,
+    estimated_time: p.estimated_time,
+    servings: p.servings,
+    servings_base: p.servings_base,
   };
 }
 
@@ -340,7 +426,9 @@ export function mergedOutputToDbRow(m: MergedRecipeOutput) {
     ingredients: m.ingredients,
     steps: m.steps,
     tips: m.tips,
-    substitutions: m.substitutions,
+    substitutions: m.substitutionsDetailed,
+    mistakes: m.mistakes,
+    techniques: m.techniques,
     estimated_time: m.estimated_time,
     servings: m.servings,
     servings_base: m.servings_base,

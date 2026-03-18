@@ -6,8 +6,28 @@ import { ingestUrl, ingestImage } from "@/lib/sourcePipeline";
 import {
   mergeRecipesIntelligent,
   mergedOutputToDbRow,
+  synthesisPayloadToMerged,
 } from "@/lib/aiMerge";
+import { synthesizeRecipeFromCombinedRaw } from "@/lib/recipeSynthesis";
+import { RAW_TEXT_JOINER } from "@/lib/recipeSourceHistory";
+import type { ExtractedRecipe } from "@/lib/types";
 import { parseIngredientLine } from "@/lib/ingredientParser";
+import {
+  finalizeStructuredSteps,
+  fallbackStructuredSteps,
+} from "@/lib/structuredSteps";
+
+function recipeToFallbackRaw(r: ExtractedRecipe): string {
+  const ing = r.ingredients
+    .map((i) =>
+      i.original ||
+      [i.quantity, i.unit, i.name].filter(Boolean).join(" ")
+    )
+    .filter(Boolean)
+    .join("\n");
+  const st = r.steps.map((s, j) => `${j + 1}. ${s}`).join("\n");
+  return [r.title, r.description, ing, st].filter(Boolean).join("\n\n");
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -30,6 +50,14 @@ export async function POST(req: NextRequest) {
     ) {
       const supabase = createServerClient();
       const validUrls = urls.filter((u: string) => String(u).trim());
+      const stepLines = fallback.steps.map((s) => String(s).trim()).filter(Boolean);
+      const structuredSteps =
+        stepLines.length > 0
+          ? (await finalizeStructuredSteps(
+              stepLines,
+              process.env.OPENAI_API_KEY || ""
+            )) ?? fallbackStructuredSteps(stepLines)
+          : [];
       const { data, error } = await supabase
         .from("recipes")
         .insert({
@@ -43,14 +71,21 @@ export async function POST(req: NextRequest) {
             optional: [],
           },
           tips: [] as string[],
-          substitutions: [] as string[],
-          steps: fallback.steps,
+          substitutions: [] as object[],
+          mistakes: [] as string[],
+          techniques: [] as string[],
+          steps: structuredSteps,
           estimated_time: "—",
           servings: "1 serving",
           servings_base: 1,
           source_urls: validUrls,
           source_platforms: validUrls.map((u: string) => detectPlatform(u)),
           raw_text: null,
+          sources: validUrls.length ? validUrls : ["manual"],
+          raw_texts: validUrls.length
+            ? validUrls.map(() => "")
+            : [""],
+          needs_review: false,
           needs_user_input: false,
           updated_at: new Date().toISOString(),
         })
@@ -93,6 +128,8 @@ export async function POST(req: NextRequest) {
     const successfulRecipes: import("@/lib/types").ExtractedRecipeWithConfidence[] =
       [];
     const rawTextParts: string[] = [];
+    const historySources: string[] = [];
+    const historyRawTexts: string[] = [];
     const sourceUrls: string[] = [];
     const sourcePlatforms: string[] = [];
     let hasReelInput = false;
@@ -114,9 +151,21 @@ export async function POST(req: NextRequest) {
       if (settled.status === "fulfilled") {
         const outcome = settled.value;
         sourceReports.push(outcome.report);
-        if (outcome.rawForDb)
-          rawTextParts.push(`--- ${u} ---\n${outcome.rawForDb}`);
-        if (outcome.recipe) successfulRecipes.push(outcome.recipe);
+        if (outcome.recipe) {
+          successfulRecipes.push(outcome.recipe);
+          const raw =
+            outcome.rawForDb?.trim() ||
+            recipeToFallbackRaw(outcome.recipe) ||
+            u;
+          historySources.push(u);
+          historyRawTexts.push(raw);
+          rawTextParts.push(`--- ${u} ---\n${raw}`);
+        } else if (outcome.rawForDb?.trim()) {
+          const raw = outcome.rawForDb.trim();
+          historySources.push(u);
+          historyRawTexts.push(raw);
+          rawTextParts.push(`--- ${u} ---\n${raw}`);
+        }
       } else {
         const reason =
           settled.reason instanceof Error
@@ -151,9 +200,22 @@ export async function POST(req: NextRequest) {
       if (settled.status === "fulfilled") {
         const outcome = settled.value;
         sourceReports.push(outcome.report);
-        if (outcome.rawForDb)
-          rawTextParts.push(`--- image ${i + 1} ---\n${outcome.rawForDb}`);
-        if (outcome.recipe) successfulRecipes.push(outcome.recipe);
+        const label = `image:${i + 1}`;
+        if (outcome.recipe) {
+          successfulRecipes.push(outcome.recipe);
+          const raw =
+            outcome.rawForDb?.trim() ||
+            recipeToFallbackRaw(outcome.recipe) ||
+            label;
+          historySources.push(label);
+          historyRawTexts.push(raw);
+          rawTextParts.push(`--- ${label} ---\n${raw}`);
+        } else if (outcome.rawForDb?.trim()) {
+          const raw = outcome.rawForDb.trim();
+          historySources.push(label);
+          historyRawTexts.push(raw);
+          rawTextParts.push(`--- ${label} ---\n${raw}`);
+        }
       } else {
         const reason =
           settled.reason instanceof Error
@@ -173,7 +235,68 @@ export async function POST(req: NextRequest) {
     const extractedCount = sourceReports.filter((r) => r.status === "success").length;
     const totalCount = sourceReports.length;
 
+    const combinedText = historyRawTexts.join(RAW_TEXT_JOINER);
+
     if (successfulRecipes.length === 0) {
+      if (historyRawTexts.length > 0) {
+        const synthOnly = await synthesizeRecipeFromCombinedRaw(
+          combinedText,
+          openaiKey,
+          dishName || "Recipe"
+        );
+        if (synthOnly) {
+          const dbPayload = mergedOutputToDbRow(
+            synthesisPayloadToMerged(synthOnly)
+          );
+          const ingTotal =
+            dbPayload.ingredients.core.length +
+            dbPayload.ingredients.optional.length;
+          if (ingTotal > 0 || dbPayload.steps.length > 0) {
+            const supabase = createServerClient();
+            const title =
+              dishName && dishName.length > 0 ? dishName : dbPayload.title;
+            const { data, error } = await supabase
+              .from("recipes")
+              .insert({
+                user_id: body.user_id ?? null,
+                title,
+                description: dbPayload.description,
+                ingredients: dbPayload.ingredients,
+                steps: dbPayload.steps,
+                tips: dbPayload.tips,
+                substitutions: dbPayload.substitutions,
+                mistakes: dbPayload.mistakes,
+                techniques: dbPayload.techniques,
+                estimated_time: dbPayload.estimated_time,
+                servings: dbPayload.servings,
+                servings_base: dbPayload.servings_base,
+                source_urls: sourceUrls,
+                source_platforms: sourcePlatforms,
+                raw_text: rawTextParts.join("\n\n") || null,
+                sources: historySources,
+                raw_texts: historyRawTexts,
+                needs_review: false,
+                needs_user_input: false,
+                updated_at: new Date().toISOString(),
+              })
+              .select("id")
+              .single();
+            if (!error && data) {
+              console.log(
+                `[recipes/create] raw-only corpus ok steps=${dbPayload.steps.length}`
+              );
+              return NextResponse.json({
+                id: data.id,
+                from_reel: hasReelInput,
+                sources: sourceReports,
+                extracted_count: extractedCount,
+                total_count: totalCount,
+              });
+            }
+          }
+        }
+      }
+
       const supabase = createServerClient();
       const draftTitle = dishName?.length ? dishName : "Draft Recipe";
       const { data, error } = await supabase
@@ -184,7 +307,9 @@ export async function POST(req: NextRequest) {
           description: "",
           ingredients: { core: [], optional: [] },
           tips: [] as string[],
-          substitutions: [] as string[],
+          substitutions: [] as object[],
+          mistakes: [] as string[],
+          techniques: [] as string[],
           steps: [],
           estimated_time: "—",
           servings: "1 serving",
@@ -192,6 +317,19 @@ export async function POST(req: NextRequest) {
           source_urls: sourceUrls,
           source_platforms: sourcePlatforms,
           raw_text: rawTextParts.join("\n\n") || null,
+          sources:
+            historySources.length > 0
+              ? historySources
+              : sourceUrls.length
+                ? sourceUrls
+                : ["draft"],
+          raw_texts:
+            historyRawTexts.length > 0
+              ? historyRawTexts
+              : rawTextParts.length
+                ? rawTextParts
+                : [],
+          needs_review: historyRawTexts.length > 0 && successfulRecipes.length === 0,
           needs_user_input: true,
           updated_at: new Date().toISOString(),
         })
@@ -216,16 +354,53 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    let mergedOut =
-      (await mergeRecipesIntelligent(successfulRecipes, openaiKey)) ??
-      null;
-    if (!mergedOut) {
-      mergedOut = await mergeRecipesIntelligent(
-        [successfulRecipes[0]],
-        openaiKey
-      );
+    const sourcesBefore = historyRawTexts.length;
+    console.log(
+      `[recipes/create] corpus sources=${sourcesBefore} combinedLen=${combinedText.length}`
+    );
+
+    let dbPayload: ReturnType<typeof mergedOutputToDbRow>;
+    let needsReview = false;
+
+    const synth = await synthesizeRecipeFromCombinedRaw(
+      combinedText,
+      openaiKey,
+      dishName || successfulRecipes[0]?.title || "Recipe"
+    );
+    if (synth) {
+      const merged = synthesisPayloadToMerged(synth);
+      dbPayload = mergedOutputToDbRow(merged);
+      const ingN =
+        dbPayload.ingredients.core.length + dbPayload.ingredients.optional.length;
+      if (ingN === 0 && dbPayload.steps.length === 0) {
+        needsReview = true;
+        let mergedOut =
+          (await mergeRecipesIntelligent(successfulRecipes, openaiKey)) ??
+          null;
+        if (!mergedOut) {
+          mergedOut = await mergeRecipesIntelligent(
+            [successfulRecipes[0]],
+            openaiKey
+          );
+        }
+        if (mergedOut) dbPayload = mergedOutputToDbRow(mergedOut);
+      } else {
+        console.log(
+          `[recipes/create] AI corpus ok title=${dbPayload.title.slice(0, 50)} steps=${dbPayload.steps.length}`
+        );
+      }
+    } else {
+      needsReview = true;
+      let mergedOut =
+        (await mergeRecipesIntelligent(successfulRecipes, openaiKey)) ?? null;
+      if (!mergedOut) {
+        mergedOut = await mergeRecipesIntelligent(
+          [successfulRecipes[0]],
+          openaiKey
+        );
+      }
+      dbPayload = mergedOutputToDbRow(mergedOut!);
     }
-    const dbPayload = mergedOutputToDbRow(mergedOut!);
 
     const title =
       dishName && dishName.length > 0 ? dishName : dbPayload.title;
@@ -237,12 +412,17 @@ export async function POST(req: NextRequest) {
       steps: dbPayload.steps,
       tips: dbPayload.tips,
       substitutions: dbPayload.substitutions,
+      mistakes: dbPayload.mistakes,
+      techniques: dbPayload.techniques,
       estimated_time: dbPayload.estimated_time,
       servings: dbPayload.servings,
       servings_base: dbPayload.servings_base,
       source_urls: sourceUrls,
       source_platforms: sourcePlatforms,
       raw_text: rawTextParts.join("\n\n") || undefined,
+      sources: historySources.length ? historySources : sourceUrls,
+      raw_texts: historyRawTexts.length ? historyRawTexts : [],
+      needs_review: needsReview,
     };
 
     const supabase = createServerClient();
@@ -259,12 +439,17 @@ export async function POST(req: NextRequest) {
         steps: recipeRow.steps,
         tips: recipeRow.tips,
         substitutions: recipeRow.substitutions,
+        mistakes: recipeRow.mistakes,
+        techniques: recipeRow.techniques,
         estimated_time: recipeRow.estimated_time,
         servings: recipeRow.servings,
         servings_base: recipeRow.servings_base,
         source_urls: recipeRow.source_urls,
         source_platforms: recipeRow.source_platforms,
         raw_text: recipeRow.raw_text,
+        sources: recipeRow.sources,
+        raw_texts: recipeRow.raw_texts,
+        needs_review: recipeRow.needs_review,
         needs_user_input: needsUserInput,
         updated_at: new Date().toISOString(),
       })

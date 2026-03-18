@@ -12,7 +12,37 @@ function setStatus(msg, type) {
 
 function showView(name) {
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  document.getElementById(name === "success" ? "view-success" : "view-main").classList.add("active");
+  const id =
+    name === "success"
+      ? "view-success"
+      : name === "diff"
+        ? "view-diff"
+        : "view-main";
+  document.getElementById(id).classList.add("active");
+}
+
+function fillDiffModal(d) {
+  const sum = document.getElementById("diff-summary");
+  sum.textContent = (d && d.summary) || "Recipe improved with your new source.";
+  function fillList(id, wrapId, arr) {
+    const ul = document.getElementById(id);
+    const wrap = document.getElementById(wrapId);
+    ul.innerHTML = "";
+    const list = Array.isArray(arr) ? arr : [];
+    if (!list.length) {
+      wrap.style.display = "none";
+      return;
+    }
+    wrap.style.display = "block";
+    list.forEach((t) => {
+      const li = document.createElement("li");
+      li.textContent = String(t);
+      ul.appendChild(li);
+    });
+  }
+  fillList("diff-insights", "diff-insights-wrap", d.new_insights);
+  fillList("diff-ing", "diff-ing-wrap", d.ingredient_changes);
+  fillList("diff-step", "diff-step-wrap", d.step_changes);
 }
 
 function escapeHtml(s) {
@@ -312,7 +342,12 @@ document.getElementById("btn-submit").addEventListener("click", async () => {
       target.mode === "merge"
         ? "Recipe updated with new source."
         : "New recipe created from this page.";
-    showView("success");
+    if (target.mode === "merge" && data.last_diff) {
+      fillDiffModal(data.last_diff);
+      showView("diff");
+    } else {
+      showView("success");
+    }
     setStatus("", "info");
     document.getElementById("status").className = "";
   } catch (e) {
@@ -326,7 +361,10 @@ document.getElementById("btn-view-recipe").addEventListener("click", async () =>
   const s = await chrome.storage.local.get(STORAGE_ID);
   const id = lastRecipeId || s[STORAGE_ID];
   const base = lastBase || (await getBackendBase()) || DEFAULT_BASES[0];
-  if (id) await chrome.tabs.create({ url: `${base}/recipe/${id}` });
+  if (id) {
+    const bust = Date.now();
+    await chrome.tabs.create({ url: `${base}/recipe/${id}?updated=${bust}` });
+  }
   window.close();
 });
 
@@ -334,6 +372,10 @@ document.getElementById("btn-add-another").addEventListener("click", async () =>
   showView("main");
   document.getElementById("recipe-name").value = "";
   await loadRecipesAndRender();
+});
+
+document.getElementById("btn-diff-continue").addEventListener("click", () => {
+  showView("success");
 });
 
 loadRecipesAndRender();

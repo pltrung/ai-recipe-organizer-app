@@ -2,7 +2,12 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import type { Recipe, ScaledIngredient, StructuredIngredient } from "@/lib/types";
+import type {
+  Recipe,
+  RecipeStep,
+  ScaledIngredient,
+  StructuredIngredient,
+} from "@/lib/types";
 import {
   formatIngredientOriginal,
   formatQuantity,
@@ -16,6 +21,7 @@ type RecipeViewProps = {
   recipe: Recipe;
   sourceCount?: number;
   needsUserInput?: boolean;
+  needsReview?: boolean;
   onEdit?: () => void;
   onSave?: () => void;
   onDuplicate?: () => void;
@@ -70,17 +76,24 @@ export function RecipeView({
   recipe,
   sourceCount = 0,
   needsUserInput = false,
+  needsReview = false,
   onEdit,
   onSave,
   onDuplicate,
 }: RecipeViewProps) {
   const core = recipe.ingredients?.core ?? EMPTY_ING;
   const optional = recipe.ingredients?.optional ?? EMPTY_ING;
-  const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+  const steps: RecipeStep[] = Array.isArray(recipe.steps)
+    ? (recipe.steps as RecipeStep[]).filter(
+        (s) => s && typeof s === "object" && String(s.instructions || "").trim()
+      )
+    : [];
   const tips = Array.isArray(recipe.tips) ? recipe.tips : [];
   const substitutions = Array.isArray(recipe.substitutions)
     ? recipe.substitutions
     : [];
+  const mistakes = Array.isArray(recipe.mistakes) ? recipe.mistakes : [];
+  const techniques = Array.isArray(recipe.techniques) ? recipe.techniques : [];
   const sourceUrls = Array.isArray(recipe.source_urls) ? recipe.source_urls : [];
   const ingTotal = core.length + optional.length;
   const isEmpty = ingTotal === 0 && steps.length === 0;
@@ -109,6 +122,13 @@ export function RecipeView({
 
   return (
     <article className="mx-auto max-w-2xl">
+      {needsReview && (
+        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <strong>Needs review:</strong> A new source was saved, but the recipe
+          couldn&apos;t be re-synthesized automatically. Content below may be
+          stale — add another source from the extension or edit manually.
+        </div>
+      )}
       {showBuilderCta && (
         <div className="mb-8 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-amber-950">
           <p className="font-medium">We couldn’t extract everything yet.</p>
@@ -147,6 +167,36 @@ export function RecipeView({
           )}
           {recipe.servings && <span> · {recipe.servings}</span>}
         </div>
+        {recipe.versions && recipe.versions.length > 0 && (
+          <details className="mt-6 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm">
+            <summary className="cursor-pointer font-medium text-neutral-800">
+              Source update history ({recipe.versions.length})
+            </summary>
+            <ul className="mt-3 space-y-3 border-t border-neutral-100 pt-3 text-neutral-600">
+              {recipe.versions.slice(0, 8).map((v, i) => (
+                <li key={i} className="text-xs leading-relaxed">
+                  <span className="font-medium text-neutral-700">
+                    {v.at
+                      ? new Date(v.at).toLocaleString(undefined, {
+                          month: "short",
+                          day: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })
+                      : "Update"}
+                  </span>
+                  {v.source_count_after ? (
+                    <span className="text-neutral-400">
+                      {" "}
+                      · {v.source_count_after} sources
+                    </span>
+                  ) : null}
+                  <p className="mt-0.5 text-neutral-600">{v.summary}</p>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </header>
 
       <div className="mb-8 rounded-xl border border-sky-100 bg-sky-50/80 px-4 py-3 text-sm text-sky-950">
@@ -310,13 +360,30 @@ export function RecipeView({
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-amber-900">
             Substitutions
           </h2>
-          <ul className="space-y-2 text-sm text-amber-950">
-            {substitutions.map((line, i) => (
-              <li key={i} className="flex gap-2">
-                <span className="text-amber-600">↔</span>
-                <span>{line}</span>
-              </li>
-            ))}
+          <ul className="space-y-3 text-sm text-amber-950">
+            {substitutions.map((sub, i) => {
+              const original =
+                typeof sub === "string"
+                  ? sub
+                  : (sub as { original?: string }).original ?? "";
+              const alts =
+                typeof sub === "object" &&
+                sub &&
+                Array.isArray((sub as { alternatives?: string[] }).alternatives)
+                  ? (sub as { alternatives: string[] }).alternatives
+                  : [];
+              if (!original) return null;
+              return (
+                <li key={i} className="flex flex-col gap-1">
+                  <span className="font-medium text-amber-950">{original}</span>
+                  {alts.length > 0 && (
+                    <span className="text-amber-900/90">
+                      Alternatives: {alts.join(" · ")}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}
@@ -328,15 +395,39 @@ export function RecipeView({
         {steps.length === 0 ? (
           <p className="text-sm text-neutral-400">No steps yet.</p>
         ) : (
-          <ol className="space-y-4">
+          <ol className="space-y-8">
             {steps.map((step, i) => (
-              <li key={i} className="flex gap-3">
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-sm font-semibold text-white">
+              <li key={i} className="flex gap-4">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-sm font-semibold text-white">
                   {i + 1}
                 </span>
-                <span className="pt-0.5 text-neutral-800 leading-relaxed">
-                  {step}
-                </span>
+                <div className="min-w-0 flex-1 border-b border-neutral-100 pb-6 last:border-0 last:pb-0">
+                  <h3 className="font-semibold text-neutral-900">
+                    {step.title}
+                  </h3>
+                  {step.time && step.time !== "—" && (
+                    <p className="mt-1 text-xs font-medium uppercase tracking-wide text-neutral-500">
+                      {step.time}
+                    </p>
+                  )}
+                  <p className="mt-2 text-neutral-800 leading-relaxed">
+                    {step.instructions}
+                  </p>
+                  {step.tools && step.tools.length > 0 && (
+                    <p className="mt-2 text-sm text-neutral-600">
+                      <span className="font-medium text-neutral-700">
+                        Tools:{" "}
+                      </span>
+                      {step.tools.join(", ")}
+                    </p>
+                  )}
+                  {step.goal && (
+                    <p className="mt-2 rounded-lg bg-emerald-50/80 px-3 py-2 text-sm text-emerald-900">
+                      <span className="font-medium">Goal: </span>
+                      {step.goal}
+                    </p>
+                  )}
+                </div>
               </li>
             ))}
           </ol>
@@ -344,15 +435,47 @@ export function RecipeView({
       </section>
 
       {tips.length > 0 && (
-        <section className="mb-10 rounded-2xl border border-violet-100 bg-violet-50/60 px-5 py-4">
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-violet-900">
-            Tips & enhancements
+        <section className="mb-10 rounded-2xl border-2 border-violet-200 bg-violet-50 px-5 py-5 shadow-sm ring-1 ring-violet-100">
+          <h2 className="mb-3 text-sm font-bold uppercase tracking-wider text-violet-950">
+            Tips & pro knowledge
           </h2>
-          <ul className="space-y-2 text-sm text-violet-950">
+          <ul className="space-y-2.5 text-sm font-medium text-violet-950">
             {tips.map((tip, i) => (
               <li key={i} className="flex gap-2">
-                <span className="text-violet-500">✦</span>
+                <span className="text-violet-600">✦</span>
                 <span>{tip}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {techniques.length > 0 && (
+        <section className="mb-10 rounded-2xl border border-blue-100 bg-blue-50/60 px-5 py-4">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-blue-900">
+            Techniques
+          </h2>
+          <ul className="space-y-2 text-sm text-blue-950">
+            {techniques.map((t, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="text-blue-600">◇</span>
+                <span>{t}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {mistakes.length > 0 && (
+        <section className="mb-10 rounded-2xl border-2 border-red-200 bg-red-50/80 px-5 py-4">
+          <h2 className="mb-3 text-sm font-bold uppercase tracking-wider text-red-900">
+            Common mistakes to avoid
+          </h2>
+          <ul className="space-y-2 text-sm text-red-950">
+            {mistakes.map((m, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="text-red-600">⚠</span>
+                <span>{m}</span>
               </li>
             ))}
           </ul>

@@ -43,6 +43,23 @@ export interface ScaledIngredient extends StructuredIngredient {
   scaledQuantity: number | null;
 }
 
+/** Structured cooking step (final saved shape) */
+export type RecipeStep = {
+  title: string;
+  instructions: string;
+  time: string;
+  tools: string[];
+  goal: string;
+  /** When set (synthesis), preferred for display ordering */
+  time_minutes?: number;
+};
+
+/** Substitution groups from synthesis */
+export type RecipeSubstitutionEntry = {
+  original: string;
+  alternatives: string[];
+};
+
 export interface ExtractedRecipe {
   title: string;
   description: string;
@@ -71,11 +88,11 @@ export interface Recipe {
   title: string;
   description: string;
   ingredients: RecipeIngredientsGrouped;
-  steps: string[];
+  steps: RecipeStep[];
   /** Chef tips / enhancements from merged sources */
   tips: string[];
-  /** Suggested alternatives (e.g. "Fish sauce: use soy sauce if unavailable") */
-  substitutions: string[];
+  /** Structured substitution groups (legacy rows may be string-only) */
+  substitutions: RecipeSubstitutionEntry[];
   estimated_time: string;
   servings: string;
   /** Base serving count for ingredient scaling */
@@ -87,7 +104,59 @@ export interface Recipe {
   updated_at?: string;
   /** True when recipe is a draft (weak capture); show empty-state CTA */
   needs_user_input?: boolean;
+  /** AI re-synthesis failed after a new source was saved; recipe body may be stale */
+  needs_review?: boolean;
+  /** Per-capture source label (URL etc.), parallel to raw_texts */
+  sources?: string[];
+  /** Raw text per source; combined with --- for full re-synthesis */
+  raw_texts?: string[];
+  /** Latest merge diff (structured + AI summary) */
+  last_diff?: RecipeLastDiff | null;
+  /** Rolling diff history (newest first), max ~10 */
+  versions?: RecipeDiffVersionEntry[];
+  /** Common mistakes to avoid */
+  mistakes: string[];
+  /** Named techniques worth highlighting */
+  techniques: string[];
 }
+
+export type RecipeDiffStructured = {
+  added_core: string[];
+  removed_core: string[];
+  added_optional: string[];
+  removed_optional: string[];
+  moved_core_to_optional: string[];
+  moved_optional_to_core: string[];
+  steps_new: string[];
+  steps_removed: string[];
+  steps_modified: { before: string; after: string }[];
+  new_tips: string[];
+  removed_tips: string[];
+  new_mistakes: string[];
+  removed_mistakes: string[];
+  new_techniques: string[];
+  removed_techniques: string[];
+};
+
+/** Stored on recipe after a successful re-synthesis from a new source */
+export type RecipeLastDiff = {
+  at: string;
+  source_count_after: number;
+  summary: string;
+  ingredient_changes: string[];
+  step_changes: string[];
+  new_insights: string[];
+  structured?: RecipeDiffStructured;
+};
+
+export type RecipeDiffVersionEntry = {
+  at: string;
+  source_count_after: number;
+  summary: string;
+  ingredient_changes: string[];
+  step_changes: string[];
+  new_insights: string[];
+};
 
 export interface RecipeRow {
   id: string;
@@ -98,6 +167,8 @@ export interface RecipeRow {
   steps: Record<string, unknown>;
   tips?: unknown;
   substitutions?: unknown;
+  mistakes?: unknown;
+  techniques?: unknown;
   estimated_time: string;
   servings: string;
   servings_base?: number;

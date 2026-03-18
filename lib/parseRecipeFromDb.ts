@@ -1,6 +1,69 @@
-import type { Recipe, RecipeIngredientsGrouped } from "./types";
+import type {
+  Recipe,
+  RecipeDiffVersionEntry,
+  RecipeIngredientsGrouped,
+  RecipeLastDiff,
+  RecipeStep,
+  RecipeSubstitutionEntry,
+} from "./types";
 import { coerceStructuredIngredient } from "./ingredientParser";
 import { parseServingsCount, servingsDisplayLabel } from "./ingredientScale";
+import { parseJsonStringArray } from "./recipeSourceHistory";
+
+function parseOneStep(item: unknown, index: number): RecipeStep | null {
+  if (typeof item === "string") {
+    const t = item.trim();
+    if (!t) return null;
+    return {
+      title: `Step ${index + 1}`,
+      instructions: t,
+      time: "As needed",
+      tools: [],
+      goal: "Complete before continuing.",
+    };
+  }
+  if (!item || typeof item !== "object") return null;
+  const o = item as Record<string, unknown>;
+  const title =
+    typeof o.title === "string" && o.title.trim()
+      ? o.title.trim()
+      : `Step ${index + 1}`;
+  const instructions =
+    typeof o.instructions === "string" && o.instructions.trim()
+      ? o.instructions.trim()
+      : "";
+  if (!instructions) return null;
+  const time =
+    typeof o.time === "string" && o.time.trim()
+      ? o.time.trim()
+      : "As needed";
+  const tools = Array.isArray(o.tools)
+    ? o.tools.map((x) => String(x).trim()).filter(Boolean)
+    : [];
+  const goal =
+    typeof o.goal === "string" && o.goal.trim()
+      ? o.goal.trim()
+      : "Complete this step before moving on.";
+  let time_minutes: number | undefined;
+  if (typeof o.time_minutes === "number" && !Number.isNaN(o.time_minutes)) {
+    time_minutes = Math.round(o.time_minutes);
+  }
+  return { title, instructions, time, tools, goal, time_minutes };
+}
+
+export function parseStepsFromDb(raw: unknown): RecipeStep[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RecipeStep[] = [];
+  let i = 0;
+  for (const item of raw) {
+    const s = parseOneStep(item, i);
+    if (s) {
+      out.push(s);
+      i++;
+    }
+  }
+  return out;
+}
 
 function parseIngredientsFromDb(raw: unknown): RecipeIngredientsGrouped {
   const toStructured = (arr: unknown[]): RecipeIngredientsGrouped["core"] => {
@@ -28,9 +91,89 @@ export function parseTipsFromDb(raw: unknown): string[] {
   return raw.map((x) => String(x).trim()).filter(Boolean);
 }
 
-export function parseSubstitutionsFromDb(raw: unknown): string[] {
+export function parseSubstitutionsFromDb(
+  raw: unknown
+): RecipeSubstitutionEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RecipeSubstitutionEntry[] = [];
+  for (const item of raw) {
+    if (typeof item === "string") {
+      const t = item.trim();
+      if (t) out.push({ original: t, alternatives: [] });
+      continue;
+    }
+    if (item && typeof item === "object") {
+      const o = item as Record<string, unknown>;
+      const original = String(o.original ?? o.name ?? "").trim();
+      const alts = Array.isArray(o.alternatives)
+        ? o.alternatives.map((a) => String(a).trim()).filter(Boolean)
+        : [];
+      if (original) out.push({ original, alternatives: alts });
+    }
+  }
+  return out;
+}
+
+export function parseMistakesFromDb(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((x) => String(x).trim()).filter(Boolean);
+}
+
+export function parseTechniquesFromDb(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((x) => String(x).trim()).filter(Boolean);
+}
+
+function parseLastDiff(raw: unknown): RecipeLastDiff | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const summary = String(o.summary ?? "").trim();
+  const ing = Array.isArray(o.ingredient_changes)
+    ? o.ingredient_changes.map(String)
+    : [];
+  const st = Array.isArray(o.step_changes)
+    ? o.step_changes.map(String)
+    : [];
+  const ins = Array.isArray(o.new_insights)
+    ? o.new_insights.map(String)
+    : [];
+  if (!summary && !ing.length && !st.length && !ins.length) return null;
+  return {
+    at: String(o.at ?? ""),
+    source_count_after: Number(o.source_count_after) || 0,
+    summary: summary || "Recipe updated.",
+    ingredient_changes: ing,
+    step_changes: st,
+    new_insights: ins,
+    structured:
+      o.structured && typeof o.structured === "object"
+        ? (o.structured as RecipeLastDiff["structured"])
+        : undefined,
+  };
+}
+
+function parseVersions(raw: unknown): RecipeDiffVersionEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RecipeDiffVersionEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const v = item as Record<string, unknown>;
+    out.push({
+      at: String(v.at ?? ""),
+      source_count_after: Number(v.source_count_after) || 0,
+      summary: String(v.summary ?? ""),
+      ingredient_changes: Array.isArray(v.ingredient_changes)
+        ? v.ingredient_changes.map(String)
+        : [],
+      step_changes: Array.isArray(v.step_changes)
+        ? v.step_changes.map(String)
+        : [],
+      new_insights: Array.isArray(v.new_insights)
+        ? v.new_insights.map(String)
+        : [],
+    });
+  }
+  return out;
 }
 
 export function recipeFromDbRow(data: Record<string, unknown>): Recipe {
@@ -49,9 +192,7 @@ export function recipeFromDbRow(data: Record<string, unknown>): Recipe {
     title: String(data.title ?? ""),
     description: String(data.description ?? ""),
     ingredients: ing,
-    steps: Array.isArray(data.steps)
-      ? data.steps.map((x) => String(x).trim()).filter(Boolean)
-      : [],
+    steps: parseStepsFromDb(data.steps),
     tips: parseTipsFromDb(data.tips),
     substitutions: parseSubstitutionsFromDb(data.substitutions),
     estimated_time: String(data.estimated_time ?? ""),
@@ -64,5 +205,12 @@ export function recipeFromDbRow(data: Record<string, unknown>): Recipe {
       ? data.source_platforms.map(String)
       : [],
     needs_user_input: Boolean(data.needs_user_input),
+    needs_review: Boolean(data.needs_review),
+    sources: parseJsonStringArray(data.sources).map((s) => s.trim()),
+    raw_texts: parseJsonStringArray(data.raw_texts),
+    last_diff: parseLastDiff(data.last_diff),
+    versions: parseVersions(data.versions),
+    mistakes: parseMistakesFromDb(data.mistakes),
+    techniques: parseTechniquesFromDb(data.techniques),
   };
 }
