@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #fafafa;
+  --foreground: #171717;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+/* Minimal focus ring for accessibility */
+*:focus-visible {
+  @apply outline-2 outline-offset-2 outline-neutral-400;
+}
