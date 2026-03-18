@@ -30,6 +30,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# Chrome extension packaged builds
+*.crx
+*.pem
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

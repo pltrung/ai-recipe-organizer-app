@@ -1,17 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Recipe Cloud",
-  "version": "1.0",
+  "version": "1.0.1",
   "description": "Save recipes from anywhere",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "tabs"],
   "host_permissions": [
     "http://localhost:3000/*",
     "https://*.vercel.app/*"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
   "action": {
-    "default_title": "Save Recipe"
+    "default_title": "Recipe Cloud",
+    "default_popup": "popup.html"
   }
 }

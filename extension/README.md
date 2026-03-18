@@ -25,14 +25,22 @@ Leave it running at **http://localhost:3000**. Ensure Supabase and OpenAI are co
 
 Click the puzzle icon in the Chrome toolbar → pin "Recipe Cloud" so the icon is always visible.
 
-### 4. Test the flow
+### 4. How the extension works
+
+1. Click the **Recipe Cloud** icon in the toolbar → a **small popup** opens (this is the UI).
+2. Click **“Save recipe from this page”** in the popup.
+3. Status messages appear in the popup (“Reading…”, “Saving…”), then a **new tab** opens with your recipe.
+
+*(Earlier versions had no popup and used `alert()` in the background worker—which Chrome does not show, so it looked like nothing happened.)*
+
+### 5. Test the flow
 
 1. Open a tab with a recipe:
    - A **blog** (e.g. [Hungry Huy – Bún Bò Huế](https://www.hungryhuy.com/bun-bo-hue-recipe/))
    - A **YouTube** cooking video page
    - **Instagram** or **TikTok** recipe post (web)
-2. Click the **Recipe Cloud** extension icon (toolbar)
-3. A **new tab** should open with your Recipe Cloud app showing the saved recipe (or a draft you can edit)
+2. Click the **Recipe Cloud** icon → in the popup, click **Save recipe from this page**
+3. A **new tab** should open with your saved recipe (or a draft you can edit)
 
 ### If something goes wrong
 
@@ -44,6 +52,6 @@ Click the puzzle icon in the Chrome toolbar → pin "Recipe Cloud" so the icon i
 
 To point the extension at your deployed app:
 
-1. In `background.js`, set `BACKEND_BASE` to your app URL (e.g. `https://your-app.vercel.app`).
+1. In `popup.js`, set `BACKEND_BASE` to your app URL (e.g. `https://your-app.vercel.app`).
 2. In `manifest.json`, ensure that URL is in `host_permissions` (e.g. `https://your-app.vercel.app/*`).
 3. Reload the extension in chrome://extensions.
