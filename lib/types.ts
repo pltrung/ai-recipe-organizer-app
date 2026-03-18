@@ -56,6 +56,9 @@ export interface Recipe {
   source_platforms: string[];
   raw_text?: string;
   created_at?: string;
+  updated_at?: string;
+  /** True when recipe is a draft (weak capture); show empty-state CTA */
+  needs_user_input?: boolean;
 }
 
 export interface RecipeRow {
@@ -71,4 +74,6 @@ export interface RecipeRow {
   source_platforms: Record<string, unknown>;
   raw_text: string | null;
   created_at: string;
+  updated_at?: string;
+  needs_user_input?: boolean;
 }

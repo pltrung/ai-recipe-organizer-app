@@ -23,7 +23,10 @@ async function getRecipe(id: string): Promise<Recipe | null> {
     estimated_time: data.estimated_time ?? "",
     servings: data.servings ?? "",
     source_urls: Array.isArray(data.source_urls) ? data.source_urls : [],
-    source_platforms: Array.isArray(data.source_platforms) ? data.source_platforms : [],
+    source_platforms: Array.isArray(data.source_platforms)
+      ? data.source_platforms
+      : [],
+    needs_user_input: Boolean(data.needs_user_input),
   };
 }
 
@@ -63,7 +66,11 @@ export default async function RecipePage({
             steps below if needed.
           </p>
         )}
-        <RecipeView recipe={recipe} sourceCount={sourceCount} />
+        <RecipeView
+          recipe={recipe}
+          sourceCount={sourceCount}
+          needsUserInput={recipe.needs_user_input}
+        />
       </main>
     </div>
   );

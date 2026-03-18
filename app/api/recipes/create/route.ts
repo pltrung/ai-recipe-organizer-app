@@ -40,6 +40,8 @@ export async function POST(req: NextRequest) {
           source_urls: validUrls,
           source_platforms: validUrls.map((u: string) => detectPlatform(u)),
           raw_text: null,
+          needs_user_input: false,
+          updated_at: new Date().toISOString(),
         })
         .select("id")
         .single();
@@ -113,6 +115,8 @@ export async function POST(req: NextRequest) {
           source_url: u,
           platform: classifyLink(u).platform,
           status: "failed",
+          ingredients_count: 0,
+          steps_count: 0,
           error: reason,
         });
       }
@@ -148,6 +152,8 @@ export async function POST(req: NextRequest) {
           source_url: `image:${i + 1}`,
           platform: "image",
           status: "failed",
+          ingredients_count: 0,
+          steps_count: 0,
           error: reason,
         });
       }
@@ -157,17 +163,43 @@ export async function POST(req: NextRequest) {
     const totalCount = sourceReports.length;
 
     if (successfulRecipes.length === 0) {
-      return NextResponse.json(
-        {
-          error:
-            "We couldn't extract a usable recipe from any source. Add ingredients and steps below—or try different links.",
-          has_reel_input: hasReelInput,
-          sources: sourceReports,
-          extracted_count: extractedCount,
-          total_count: totalCount,
-        },
-        { status: 422 }
-      );
+      const supabase = createServerClient();
+      const draftTitle = dishName?.length ? dishName : "Draft Recipe";
+      const { data, error } = await supabase
+        .from("recipes")
+        .insert({
+          user_id: body.user_id ?? null,
+          title: draftTitle,
+          description: "",
+          ingredients: [],
+          steps: [],
+          estimated_time: "—",
+          servings: "—",
+          source_urls: sourceUrls,
+          source_platforms: sourcePlatforms,
+          raw_text: rawTextParts.join("\n\n") || null,
+          needs_user_input: true,
+          updated_at: new Date().toISOString(),
+        })
+        .select("id")
+        .single();
+      if (error) {
+        console.error(error);
+        return NextResponse.json(
+          { error: "Failed to save draft recipe" },
+          { status: 500 }
+        );
+      }
+      return NextResponse.json({
+        id: data.id,
+        from_reel: hasReelInput,
+        sources: sourceReports,
+        extracted_count: extractedCount,
+        total_count: totalCount,
+        is_draft: true,
+        message:
+          "Saved as draft. Open the recipe to add sources or edit — no source returned structured ingredients and steps.",
+      });
     }
 
     let merged: import("@/lib/types").ExtractedRecipe | null = null;
@@ -195,6 +227,8 @@ export async function POST(req: NextRequest) {
     };
 
     const supabase = createServerClient();
+    const needsUserInput =
+      merged!.ingredients.length === 0 && merged!.steps.length === 0;
     const { data, error } = await supabase
       .from("recipes")
       .insert({
@@ -208,6 +242,8 @@ export async function POST(req: NextRequest) {
         source_urls: recipeRow.source_urls,
         source_platforms: recipeRow.source_platforms,
         raw_text: recipeRow.raw_text,
+        needs_user_input: needsUserInput,
+        updated_at: new Date().toISOString(),
       })
       .select("id")
       .single();

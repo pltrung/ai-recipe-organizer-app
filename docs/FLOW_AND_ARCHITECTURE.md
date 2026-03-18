@@ -280,7 +280,17 @@ User input (URLs + images)
 
 ---
 
-## 13. Future-friendly (not fully built)
+## 13. Recipe Builder (Chrome extension + web)
+
+- **Extension** stores `activeRecipeId` (and title/source count) in `chrome.storage.local`.
+- **No active recipe:** optional name + “Save this page” → `POST /api/extract-from-extension` (creates row, may be draft if `raw_text` &lt; 200 chars).
+- **Active recipe:** “Add this page to recipe” sends same endpoint with `recipeId` → server loads recipe, appends source URL, merges new text via OpenAI `mergeRecipes`, updates `updated_at`.
+- **Drafts:** `needs_user_input` + empty ingredients/steps when capture is weak; recipe page shows CTA to add sources.
+- **Dashboard:** ordered by `updated_at`; cards show source count + last updated.
+
+---
+
+## 14. Future-friendly (not fully built)
 
 Structure supports adding:
 
@@ -291,4 +301,4 @@ Structure supports adding:
 
 ---
 
-*Last updated to match the codebase behavior for multi-link partial success, website extraction stack, and Chrome extension options.*
+*Last updated: Recipe Builder flow, extension popup states, `extract-from-extension` merge path.*

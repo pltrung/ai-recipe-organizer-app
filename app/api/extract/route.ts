@@ -16,8 +16,11 @@ export async function POST(req: NextRequest) {
     const platform = detectPlatform(url);
     const rawText = await fetchContent(url, platform);
     const recipe = await extractRecipe(rawText, key);
-    if (!recipe) {
-      return NextResponse.json({ error: "Extraction failed" }, { status: 422 });
+    if (!recipe.ingredients.length && !recipe.steps.length) {
+      return NextResponse.json(
+        { error: "No recipe content extracted" },
+        { status: 422 }
+      );
     }
     return NextResponse.json({ platform, recipe });
   } catch (e) {

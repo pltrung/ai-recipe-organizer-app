@@ -1,9 +1,22 @@
 const DEFAULT_BASES = ["http://127.0.0.1:3000", "http://localhost:3000"];
+const STORAGE_ID = "activeRecipeId";
+const STORAGE_TITLE = "activeRecipeTitle";
+const STORAGE_COUNT = "activeSourceCount";
 
 function setStatus(msg, type) {
   const el = document.getElementById("status");
   el.textContent = msg;
   el.className = "show " + (type || "info");
+}
+
+function showView(name) {
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+  const map = {
+    none: "view-no-active",
+    active: "view-active",
+    success: "view-success",
+  };
+  document.getElementById(map[name]).classList.add("active");
 }
 
 async function getBackendBase() {
@@ -29,36 +42,53 @@ async function fetchWithFallback(path, options) {
   throw lastErr || new Error("Failed to fetch");
 }
 
-function openOptions(e) {
+document.getElementById("open-options").addEventListener("click", (e) => {
   e.preventDefault();
   chrome.runtime.openOptionsPage();
-}
-
-document.getElementById("open-options").addEventListener("click", openOptions);
+});
 
 (async function initHint() {
   const b = await getBackendBase();
   document.getElementById("backend-hint").textContent = b
     ? `API: ${b}`
-    : "API: 127.0.0.1:3000 (then localhost). Use settings for Vercel.";
+    : "API: 127.0.0.1:3000 — set Vercel URL in settings if needed.";
 })();
+
+async function refreshUI() {
+  const s = await chrome.storage.local.get([
+    STORAGE_ID,
+    STORAGE_TITLE,
+    STORAGE_COUNT,
+  ]);
+  const id = s[STORAGE_ID];
+  if (id) {
+    document.getElementById("active-title").textContent =
+      s[STORAGE_TITLE] || "Your recipe";
+    const n = Number(s[STORAGE_COUNT]) || 1;
+    document.getElementById("active-sources").textContent =
+      n + (n === 1 ? " source" : " sources");
+    showView("active");
+  } else {
+    showView("none");
+  }
+}
+
+refreshUI();
 
 function extractPageContent() {
   const selectors =
-    "p, li, h1, h2, h3, [itemprop='recipeInstructions'] *, [itemprop='recipeIngredient']";
-  const excludeSelectors =
-    "nav, footer, header, [role='navigation'], [role='banner'], [role='contentinfo'], .nav, .footer, .header, script, style, noscript";
-
-  const excludeRoots = document.querySelectorAll(excludeSelectors);
-  const isInsideExcluded = (el) => {
+    'p, span, li, h1, h2, h3, div[role="article"]';
+  const exclude =
+    "nav, footer, header, [role='navigation'], script, style, noscript";
+  const excludeRoots = document.querySelectorAll(exclude);
+  const insideExcluded = (el) => {
     for (const root of excludeRoots) {
       if (root.contains(el)) return true;
     }
     return false;
   };
-
   const isVisible = (el) => {
-    if (!el || !el.getBoundingClientRect) return false;
+    if (!el?.getBoundingClientRect) return false;
     const rect = el.getBoundingClientRect();
     const style = window.getComputedStyle(el);
     return (
@@ -70,37 +100,71 @@ function extractPageContent() {
     );
   };
 
+  const MIN_CHUNK = 40;
+  const MAX_CHUNK = 500;
+
   const nodes = document.querySelectorAll(selectors);
   const parts = [];
   const seen = new Set();
   for (const el of nodes) {
-    if (isInsideExcluded(el)) continue;
+    if (insideExcluded(el)) continue;
     if (!isVisible(el)) continue;
-    const text = (el.innerText || el.textContent || "").trim();
-    if (!text || seen.has(text)) continue;
+    let text = (el.innerText || el.textContent || "")
+      .trim()
+      .replace(/\s+/g, " ");
+    if (text.length < MIN_CHUNK) continue;
+    if (text.length > MAX_CHUNK) text = text.slice(0, MAX_CHUNK).trim();
+    if (text.length < MIN_CHUNK) continue;
+    if (seen.has(text)) continue;
     seen.add(text);
     parts.push(text);
   }
 
-  const raw_text = parts
-    .join("\n\n")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 50000);
+  let raw_text = parts.join("\n\n").slice(0, 5000);
+  if (raw_text.length < MIN_CHUNK && parts.length === 0) {
+    const loose = [];
+    for (const el of nodes) {
+      if (insideExcluded(el) || !isVisible(el)) continue;
+      const t = (el.innerText || "").trim().replace(/\s+/g, " ");
+      if (t.length >= 25 && t.length <= 800) loose.push(t.slice(0, 500));
+    }
+    raw_text = [...new Set(loose)].join("\n\n").slice(0, 5000);
+  }
+  if (!raw_text.trim()) {
+    raw_text = (document.body.innerText || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 5000);
+  }
   const url = window.location.href;
-
-  let platform = "Website";
-  if (/youtube\.com|youtu\.be/i.test(url)) platform = "YouTube";
-  else if (/instagram\.com/i.test(url)) platform = "Instagram";
-  else if (/facebook\.com|fb\.com|fb\.watch/i.test(url)) platform = "Facebook";
-  else if (/tiktok\.com/i.test(url)) platform = "TikTok";
-  else if (/xiaohongshu|xhslink/i.test(url)) platform = "Xiaohongshu";
+  let platform = "website";
+  if (/youtube\.com|youtu\.be/i.test(url)) platform = "youtube";
+  else if (/instagram\.com/i.test(url)) platform = "instagram";
+  else if (/facebook\.com|fb\.com|fb\.watch/i.test(url)) platform = "facebook";
+  else if (/tiktok\.com/i.test(url)) platform = "tiktok";
+  else if (/xiaohongshu|xhslink/i.test(url)) platform = "xiaohongshu";
 
   return { raw_text, source_url: url, platform };
 }
 
-document.getElementById("save").addEventListener("click", async () => {
-  const btn = document.getElementById("save");
+let lastBase = null;
+let lastRecipeId = null;
+
+async function postToBackend(payload) {
+  const out = await fetchWithFallback("/api/extract-from-extension", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  lastBase = out.base;
+  const data = await out.res.json().catch(() => ({}));
+  return { res: out.res, data };
+}
+
+async function runSave(opts) {
+  const { recipeId, recipe_name } = opts;
+  const btn =
+    document.getElementById(recipeId ? "btn-add-page" : "btn-save-new");
   btn.disabled = true;
   setStatus("Reading this page…", "info");
 
@@ -114,17 +178,13 @@ document.getElementById("save").addEventListener("click", async () => {
       btn.disabled = false;
       return;
     }
-
     if (
       !tab.url ||
       tab.url.startsWith("chrome://") ||
       tab.url.startsWith("edge://") ||
       tab.url.startsWith("about:")
     ) {
-      setStatus(
-        "Open a normal website (recipe blog, YouTube, etc.). This page can’t be read.",
-        "err"
-      );
+      setStatus("Open a normal web page first.", "err");
       btn.disabled = false;
       return;
     }
@@ -133,53 +193,101 @@ document.getElementById("save").addEventListener("click", async () => {
       target: { tabId: tab.id },
       func: extractPageContent,
     });
-
     const payload = results?.[0]?.result;
-    if (!payload || !payload.source_url) {
-      setStatus("Couldn’t extract text from this page. Try another page.", "err");
+    if (!payload?.source_url) {
+      setStatus("Couldn’t read this page.", "err");
       btn.disabled = false;
       return;
     }
 
-    setStatus("Saving to Recipe Cloud…", "info");
+    const body = {
+      raw_text: payload.raw_text,
+      source_url: payload.source_url,
+      platform: payload.platform,
+      ...(recipeId ? { recipeId } : {}),
+      ...(recipe_name ? { recipe_name } : {}),
+    };
 
-    let usedBase;
+    setStatus("Saving…", "info");
+    let data;
     let res;
     try {
-      const out = await fetchWithFallback("/api/extract-from-extension", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const out = await postToBackend(body);
       res = out.res;
-      usedBase = out.base;
-    } catch (fetchErr) {
+      data = out.data;
+    } catch {
       setStatus(
-        "Can’t reach Recipe Cloud. Start the app: npm run dev (port 3000). Or open Extension settings and set your Vercel URL, then Save.",
+        "Can’t reach the app. Run npm run dev or set API URL in settings.",
         "err"
       );
       btn.disabled = false;
       return;
     }
 
-    const data = await res.json().catch(() => ({}));
-    if (data.recipeId) {
-      setStatus("Opening your recipe…", "ok");
-      await chrome.tabs.create({
-        url: `${usedBase}/recipe/${data.recipeId}`,
-      });
-      window.close();
+    if (!res.ok || !data.recipeId) {
+      setStatus(data.error || "Server error.", "err");
+      btn.disabled = false;
       return;
     }
 
-    setStatus(
-      data.error ||
-        "Server returned an error. Check the app is running and env vars are set.",
-      "err"
-    );
+    lastRecipeId = data.recipeId;
+    const title = data.title || "Recipe";
+    const sourceCount = data.sourceCount || 1;
+
+    await chrome.storage.local.set({
+      [STORAGE_ID]: data.recipeId,
+      [STORAGE_TITLE]: title,
+      [STORAGE_COUNT]: sourceCount,
+    });
+
+    document.getElementById("success-msg").textContent =
+      "Added to " + title + ".";
+    showView("success");
+    setStatus("", "info");
+    document.getElementById("status").className = "";
   } catch (e) {
     console.error(e);
-    setStatus("Something went wrong. Try Extension settings → set API URL.", "err");
+    setStatus("Something went wrong.", "err");
   }
   btn.disabled = false;
+}
+
+document.getElementById("btn-save-new").addEventListener("click", () => {
+  const name = document.getElementById("recipe-name").value.trim();
+  runSave({ recipe_name: name || undefined });
+});
+
+document.getElementById("btn-add-page").addEventListener("click", async () => {
+  const { activeRecipeId } = await chrome.storage.local.get(STORAGE_ID);
+  if (!activeRecipeId) {
+    refreshUI();
+    return;
+  }
+  runSave({ recipeId: activeRecipeId });
+});
+
+document.getElementById("btn-create-new").addEventListener("click", async () => {
+  await chrome.storage.local.remove([
+    STORAGE_ID,
+    STORAGE_TITLE,
+    STORAGE_COUNT,
+  ]);
+  document.getElementById("recipe-name").value = "";
+  showView("none");
+  setStatus("", "info");
+  document.getElementById("status").className = "";
+});
+
+document.getElementById("btn-view-recipe").addEventListener("click", async () => {
+  const s = await chrome.storage.local.get(STORAGE_ID);
+  const id = lastRecipeId || s[STORAGE_ID];
+  const base = lastBase || (await getBackendBase()) || DEFAULT_BASES[0];
+  if (id) await chrome.tabs.create({ url: `${base}/recipe/${id}` });
+  window.close();
+});
+
+document.getElementById("btn-continue-building").addEventListener("click", () => {
+  refreshUI();
+  setStatus("", "info");
+  document.getElementById("status").className = "";
 });

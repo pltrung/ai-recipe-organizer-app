@@ -36,11 +36,14 @@ export default function CreatePage() {
   const [resultSummary, setResultSummary] = useState<{
     recipeId: string;
     from_reel: boolean;
+    is_draft?: boolean;
     sources: {
       source_url: string;
       platform: string;
       status: string;
       error?: string;
+      ingredients_count?: number;
+      steps_count?: number;
     }[];
     extracted_count: number;
     total_count: number;
@@ -148,6 +151,7 @@ export default function CreatePage() {
         setResultSummary({
           recipeId: data.id,
           from_reel: !!data.from_reel,
+          is_draft: !!data.is_draft,
           sources: Array.isArray(data.sources) ? data.sources : [],
           extracted_count: data.extracted_count ?? 1,
           total_count: data.total_count ?? 1,
@@ -182,14 +186,24 @@ export default function CreatePage() {
             ← Recipe Cloud
           </Link>
           <h1 className="mt-6 text-xl font-semibold text-neutral-900">
-            Recipe saved
+            {resultSummary.is_draft ? "Draft saved" : "Recipe saved"}
           </h1>
           <p className="mt-2 text-neutral-600">
-            We extracted{" "}
-            <strong>
-              {resultSummary.extracted_count} of {resultSummary.total_count}
-            </strong>{" "}
-            sources.
+            {resultSummary.is_draft ? (
+              <>
+                We saved a <strong>draft</strong> ({resultSummary.extracted_count}{" "}
+                of {resultSummary.total_count} sources yielded structured data).
+                Open the recipe to add more links or edit.
+              </>
+            ) : (
+              <>
+                We extracted{" "}
+                <strong>
+                  {resultSummary.extracted_count} of {resultSummary.total_count}
+                </strong>{" "}
+                sources.
+              </>
+            )}
           </p>
           {resultSummary.sources.length > 0 && (
             <ul className="mt-4 space-y-2 rounded-2xl border border-neutral-100 bg-white p-4 shadow-sm">
@@ -217,6 +231,13 @@ export default function CreatePage() {
                       {s.platform}
                     </span>
                   </div>
+                  {s.status === "success" &&
+                    (s.ingredients_count != null || s.steps_count != null) && (
+                      <p className="ml-6 text-xs text-neutral-500">
+                        {s.ingredients_count ?? 0} ingredients ·{" "}
+                        {s.steps_count ?? 0} steps
+                      </p>
+                    )}
                   {s.status === "failed" && s.error && (
                     <p className="ml-6 text-xs text-neutral-500">{s.error}</p>
                   )}
