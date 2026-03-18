@@ -12,6 +12,7 @@ import type {
 import {
   dedupeIngredientList,
   normalizeIngredientName,
+  sortIngredientsByRole,
 } from "@/lib/ingredientNormalize";
 import {
   formatQuantity,
@@ -132,8 +133,12 @@ export function RecipeView({
     [coreRaw]
   );
   const optional = useMemo(
-    () => dedupeIngredientList(optionalRaw),
-    [optionalRaw]
+    () =>
+      sortIngredientsByRole(
+        dedupeIngredientList(optionalRaw),
+        quality?.ingredient_roles ?? []
+      ),
+    [optionalRaw, quality?.ingredient_roles]
   );
 
   const ingTotal = core.length + optional.length;
@@ -612,9 +617,31 @@ export function RecipeView({
                         .filter(Boolean)
                         .join(" · ") || null}
                     </p>
-                    <p className="max-w-prose text-[15px] leading-relaxed text-neutral-800">
-                      {step.instructions}
-                    </p>
+                    {step.ingredients_used && step.ingredients_used.length > 0 ? (
+                      <p className="text-xs text-neutral-500">
+                        Uses: {step.ingredients_used.join(", ")}
+                      </p>
+                    ) : null}
+                    {step.instructions_bullets && step.instructions_bullets.length > 1 ? (
+                      <ol className="max-w-prose list-decimal space-y-1.5 pl-5 text-[15px] leading-relaxed text-neutral-800">
+                        {step.instructions_bullets.map((line, j) => (
+                          <li key={j}>{line}</li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="max-w-prose text-[15px] leading-relaxed text-neutral-800">
+                        {step.instructions}
+                      </p>
+                    )}
+                    {step.checkpoints && step.checkpoints.length > 0 ? (
+                      <ul className="space-y-0.5 text-xs text-emerald-900/80">
+                        {step.checkpoints.map((c, j) => (
+                          <li key={j} className="border-l-2 border-emerald-200 pl-2">
+                            ✓ {c}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
                     {step.warnings && step.warnings.length > 0 ? (
                       <ul className="space-y-0.5 text-xs leading-snug text-amber-900/75">
                         {step.warnings.map((w, j) => (

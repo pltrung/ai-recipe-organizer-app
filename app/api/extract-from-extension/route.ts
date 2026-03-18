@@ -26,6 +26,8 @@ import {
   summarizeRecipeDiffWithAi,
   heuristicDiffSummary,
 } from "@/lib/recipeDiffAi";
+import { computeMergeQualityScore } from "@/lib/mergeQualityScore";
+import { computeIngredientScoreDiffNotes } from "@/lib/ingredientSignalScoring";
 import type { Recipe } from "@/lib/types";
 import { confidenceFromPlatformRaw } from "@/lib/sourceSynthesisConfidence";
 import type { PendingMergeV1 } from "@/lib/mergePending";
@@ -249,20 +251,39 @@ export async function POST(req: NextRequest) {
         };
         const structured = diffRecipes(previousRecipe, nextRecipe);
         const materialStructured = materialRecipeDiffStructured(structured);
+        const mergeQuality = computeMergeQualityScore(
+          previousRecipe,
+          nextRecipe,
+          structured
+        );
         const aiPart =
           (await summarizeRecipeDiffWithAi(
             previousRecipe,
             nextRecipe,
             materialStructured,
-            openaiKey
+            openaiKey,
+            mergeQuality
           )) ?? heuristicDiffSummary(materialStructured);
-        let key_improvements = [...aiPart.key_improvements];
+        const ingredientScoreNotes = computeIngredientScoreDiffNotes(
+          previousRecipe.recipe_quality?.ingredient_signals,
+          nextRecipe.recipe_quality?.ingredient_signals ?? []
+        );
+        let key_improvements = [
+          ...ingredientScoreNotes,
+          ...aiPart.key_improvements,
+        ];
+        key_improvements = Array.from(
+          new Set(key_improvements.map((s) => s.trim()))
+        ).filter(Boolean);
         if (key_improvements.length === 0) {
           key_improvements =
             heuristicDiffSummary(materialStructured).key_improvements;
         }
         key_improvements = key_improvements.slice(0, 5);
         let mergeSummary = String(aiPart.summary ?? "").trim();
+        if (aiPart.is_better_signal) {
+          mergeSummary = `${mergeSummary} ${aiPart.is_better_signal}`.trim();
+        }
         if (key_improvements.length === 0) {
           key_improvements = [
             "Your coherent recipe stayed similar — strong sources already aligned.",
@@ -279,6 +300,12 @@ export async function POST(req: NextRequest) {
           structured,
           summary: mergeSummary,
           key_improvements,
+          merge_quality_score: mergeQuality.score,
+          merge_quality_reason: mergeQuality.reason,
+          is_proposal_better: mergeQuality.is_proposal_better,
+          ...(ingredientScoreNotes.length
+            ? { ingredient_score_notes: ingredientScoreNotes }
+            : {}),
         };
         const versionEntry = {
           at,
@@ -301,6 +328,9 @@ export async function POST(req: NextRequest) {
           diff: {
             summary: last_diff.summary,
             key_improvements: last_diff.key_improvements,
+            merge_quality_score: mergeQuality.score,
+            merge_quality_reason: mergeQuality.reason,
+            is_proposal_better: mergeQuality.is_proposal_better,
           },
           last_diff,
           version_entry_apply: versionEntry,
@@ -349,8 +379,9 @@ export async function POST(req: NextRequest) {
           },
           questions: {
             what_changed: last_diff.summary,
-            better:
-              "If you apply, the recipe on Recipe Cloud updates to this merged version.",
+            better: mergeQuality.is_proposal_better
+              ? `Quality score ${mergeQuality.score}/100 — likely a solid upgrade. Still skim core + steps.`
+              : `Quality score ${mergeQuality.score}/100 — review the diff before applying.`,
             worth_keeping:
               newSourceConfidence === "low"
                 ? "This source looks thin (e.g. reel/social). Keeping it still saves the link for reference."

@@ -46,12 +46,21 @@ export interface ScaledIngredient extends StructuredIngredient {
 /** Structured cooking step (final saved shape) */
 export type RecipeStep = {
   title: string;
+  /** Primary instruction text (joined bullets for legacy consumers) */
   instructions: string;
+  /** Chef-mode: one micro-action per line when set */
+  instructions_bullets?: string[];
   time: string;
   tools: string[];
   goal: string;
   /** When set (synthesis), preferred for display ordering */
   time_minutes?: number;
+  /** Alias for time_minutes (structured authoring) */
+  duration_minutes?: number;
+  /** Ingredient names used in this step */
+  ingredients_used?: string[];
+  /** Pass/fail checks for the cook */
+  checkpoints?: string[];
   /** Inline cautions (new synthesis) */
   warnings?: string[];
 };
@@ -78,6 +87,14 @@ export type RecipeQualityMeta = {
   critical_tips: string[];
   avoid_mistakes: string[];
   ingredient_roles?: { name: string; role: string }[];
+  /** Importance scoring snapshot for merge diffs */
+  ingredient_signals?: {
+    name: string;
+    total_score: number;
+    anchor_match: boolean;
+    bucket: string;
+    frequency: number;
+  }[];
 };
 
 /** Payload from synthesis before DB merge */
@@ -183,6 +200,13 @@ export type RecipeLastDiff = {
   summary: string;
   /** Authenticity, technique, flavor — primary UX */
   key_improvements: string[];
+  /** 0–100 merge quality heuristic + explanation */
+  merge_quality_score?: number;
+  merge_quality_reason?: string;
+  /** true if score suggests the proposal is a clear upgrade */
+  is_proposal_better?: boolean;
+  /** Ingredient importance / score delta notes from merge */
+  ingredient_score_notes?: string[];
   /** Legacy rows only */
   ingredient_changes?: string[];
   step_changes?: string[];

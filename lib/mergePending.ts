@@ -25,6 +25,9 @@ export type PendingMergeV1 = {
   diff: {
     summary: string;
     key_improvements: string[];
+    merge_quality_score?: number;
+    merge_quality_reason?: string;
+    is_proposal_better?: boolean;
   };
   /** Set when synth_ok — committed on apply */
   last_diff: RecipeLastDiff | null;

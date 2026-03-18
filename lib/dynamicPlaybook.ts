@@ -3,6 +3,8 @@
  * dish-family skeletons, cuisine lenses, and source-derived anchors (AI).
  */
 
+import { mergeDishAnchors } from "./dishAnchors";
+
 export const COOKING_PRIMITIVES: Record<string, string> = {
   simmer_broth: "Long simmer to extract flavor; skim; clarify if needed",
   build_dough: "Mix, knead, rest, shape; control hydration and gluten",
@@ -304,6 +306,8 @@ function normalizeCuisineKey(cuisine: string): string {
 export type DynamicPlaybook = {
   dish_family: string;
   cuisine: string;
+  /** Structural slots that MUST appear in core (protein, coating_starch, frying_oil, …) */
+  dish_anchors: string[];
   core_roles: string[];
   expected_flow: string[];
   key_techniques: string[];
@@ -345,6 +349,7 @@ function fallbackPlaybook(
   return {
     dish_family: family,
     cuisine: lens.label,
+    dish_anchors: mergeDishAnchors(family, [], dishName),
     core_roles: ["main protein or starch", "aromatic base", "liquid or sauce", "garnish"],
     expected_flow: flow,
     key_techniques: Object.keys(COOKING_PRIMITIVES).slice(0, 5),
@@ -415,17 +420,19 @@ Serving biases: ${lens.serving_bias.join(", ") || "—"}
 TASK:
 1. Choose dish_family from the enum.
 2. Extract SIGNATURE ANCHORS from candidates: 3–8 signature_ingredients, 2–5 signature_techniques, 1–2 serving anchors.
-3. COMPOSE expected_flow: start from that family's logical order, inject anchor-specific steps where needed, add 1–2 lens-specific beats (e.g. herb finish for Vietnamese).
-4. core_roles: ingredient roles this dish type needs (e.g. broth, noodles, protein for noodle_soup).
-5. key_techniques: which primitives apply most.
-6. likely_tools: merge family tools + dish-specific.
-7. timing_expectations: realistic bands.
-8. failure_points: 3–6 dish-specific mistakes.
-9. serving_style: how it hits the table.
+3. dish_anchors: 3–8 structural slots for this dish (e.g. noodle_soup → broth, noodles, protein; pizza → dough, sauce, cheese; karaage-style → protein, coating_starch, frying_oil, marinade_base). Must align with family + dish name.
+4. COMPOSE expected_flow: start from that family's logical order, inject anchor-specific steps where needed, add 1–2 lens-specific beats (e.g. herb finish for Vietnamese).
+5. core_roles: ingredient roles this dish type needs (e.g. broth, noodles, protein for noodle_soup).
+6. key_techniques: which primitives apply most.
+7. likely_tools: merge family tools + dish-specific.
+8. timing_expectations: realistic bands.
+9. failure_points: 3–6 dish-specific mistakes.
+10. serving_style: how it hits the table.
 
 Return STRICT JSON:
 {
   "dish_family": string,
+  "dish_anchors": string[],
   "signature_ingredients": string[],
   "signature_techniques": string[],
   "core_roles": string[],
@@ -460,6 +467,7 @@ ${tipSample || "(none)"}`;
       "[dynamic-playbook] skip AI; fallback family=other cuisine=",
       lens.label
     );
+    out.dish_anchors = mergeDishAnchors("other", [], input.dishName);
     return out;
   }
 
@@ -490,10 +498,12 @@ ${tipSample || "(none)"}`;
     const expected_flow = take("expected_flow", 14);
     const sigIng = take("signature_ingredients", 10);
     const sigTech = take("signature_techniques", 6);
+    const aiAnchors = take("dish_anchors", 10);
 
     out = {
       dish_family: family,
       cuisine: lens.label,
+      dish_anchors: mergeDishAnchors(family, aiAnchors, input.dishName),
       core_roles: take("core_roles", 10),
       expected_flow:
         expected_flow.length >= 4
@@ -535,9 +545,14 @@ ${tipSample || "(none)"}`;
 
 export function playbookForPhaseC(playbook: DynamicPlaybook): string {
   const flow = playbook.expected_flow.map((s, i) => `${i + 1}. ${s}`).join("\n");
+  const anchors = playbook.dish_anchors?.length
+    ? playbook.dish_anchors.join("; ")
+    : "—";
   return `DYNAMIC PLAYBOOK (judge ingredients against this — prefer playbook + essentials over noisy sources)
 Family: ${playbook.dish_family}
 Cuisine lens: ${playbook.cuisine}
+DISH ANCHORS — MANDATORY CORE (override confidence; each slot must have a matching line in CORE): ${anchors}
+Role priority when choosing core vs optional: protein/structure > base/coating > cooking_medium > flavor > garnish.
 IDENTITY DRIVERS — signature ingredients (must be core unless truly substitutable with note): ${playbook.signature_ingredients.join("; ") || "—"}
 Signature techniques: ${playbook.signature_techniques.join("; ") || "—"}
 Core roles expected: ${playbook.core_roles.join("; ") || "—"}

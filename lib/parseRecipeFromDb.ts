@@ -29,10 +29,16 @@ function parseOneStep(item: unknown, index: number): RecipeStep | null {
     typeof o.title === "string" && o.title.trim()
       ? o.title.trim()
       : `Step ${index + 1}`;
-  const instructions =
-    typeof o.instructions === "string" && o.instructions.trim()
-      ? o.instructions.trim()
-      : "";
+  let instructions = "";
+  let instructions_bullets: string[] | undefined;
+  if (Array.isArray(o.instructions)) {
+    instructions_bullets = o.instructions
+      .map((x) => String(x).trim())
+      .filter(Boolean);
+    instructions = instructions_bullets.join("\n");
+  } else if (typeof o.instructions === "string" && o.instructions.trim()) {
+    instructions = o.instructions.trim();
+  }
   if (!instructions) return null;
   const time =
     typeof o.time === "string" && o.time.trim()
@@ -49,18 +55,39 @@ function parseOneStep(item: unknown, index: number): RecipeStep | null {
   if (typeof o.time_minutes === "number" && !Number.isNaN(o.time_minutes)) {
     time_minutes = Math.round(o.time_minutes);
   }
+  if (typeof o.duration_minutes === "number" && !Number.isNaN(o.duration_minutes)) {
+    const d = Math.round(o.duration_minutes);
+    time_minutes = Math.max(time_minutes ?? 0, d) || time_minutes;
+  }
   const warnings = Array.isArray(o.warnings)
     ? o.warnings.map((x) => String(x).trim()).filter(Boolean)
     : [];
-  return {
+  const checkpoints = Array.isArray(o.checkpoints)
+    ? o.checkpoints.map((x) => String(x).trim()).filter(Boolean)
+    : [];
+  const ingredients_used = Array.isArray(o.ingredients_used)
+    ? o.ingredients_used.map((x) => String(x).trim()).filter(Boolean)
+    : [];
+  const dm =
+    typeof o.duration_minutes === "number" && !Number.isNaN(o.duration_minutes)
+      ? Math.round(o.duration_minutes)
+      : time_minutes;
+  const out: RecipeStep = {
     title,
     instructions,
     time,
     tools,
     goal: goal || (warnings[0] ? "" : "Complete this step before moving on."),
-    time_minutes,
+    ...(time_minutes != null && time_minutes > 0 ? { time_minutes } : {}),
+    ...(dm != null && dm > 0 ? { duration_minutes: dm } : {}),
     ...(warnings.length ? { warnings } : {}),
+    ...(checkpoints.length ? { checkpoints } : {}),
+    ...(ingredients_used.length ? { ingredients_used } : {}),
   };
+  if (instructions_bullets && instructions_bullets.length > 1) {
+    out.instructions_bullets = instructions_bullets;
+  }
+  return out;
 }
 
 export function parseStepsFromDb(raw: unknown): RecipeStep[] {
@@ -176,7 +203,11 @@ function parseLastDiff(raw: unknown): RecipeLastDiff | null {
       Boolean
     );
   }
-  if (!summary && !key_improvements.length) return null;
+  const ingredient_score_notes = Array.isArray(o.ingredient_score_notes)
+    ? o.ingredient_score_notes.map(String).filter(Boolean)
+    : undefined;
+  if (!summary && !key_improvements.length && !ingredient_score_notes?.length)
+    return null;
   return {
     at: String(o.at ?? ""),
     source_count_after: Number(o.source_count_after) || 0,
@@ -185,6 +216,9 @@ function parseLastDiff(raw: unknown): RecipeLastDiff | null {
     ...(ing.length ? { ingredient_changes: ing } : {}),
     ...(st.length ? { step_changes: st } : {}),
     ...(ins.length ? { new_insights: ins } : {}),
+    ...(ingredient_score_notes?.length
+      ? { ingredient_score_notes: ingredient_score_notes.slice(0, 8) }
+      : {}),
     structured:
       o.structured && typeof o.structured === "object"
         ? (o.structured as RecipeLastDiff["structured"])
@@ -257,6 +291,26 @@ function parseRecipeQuality(raw: unknown): RecipeQualityMeta | null {
     typeof o.cuisine === "string" && o.cuisine.trim()
       ? o.cuisine.trim()
       : undefined;
+  type Sig = NonNullable<RecipeQualityMeta["ingredient_signals"]>[number];
+  const ingredient_signals: Sig[] | undefined = Array.isArray(
+    o.ingredient_signals
+  )
+    ? (o.ingredient_signals as unknown[])
+        .map((x): Sig | null => {
+          if (!x || typeof x !== "object") return null;
+          const r = x as Record<string, unknown>;
+          const name = String(r.name ?? "").trim();
+          if (!name) return null;
+          return {
+            name,
+            total_score: Number(r.total_score) || 0,
+            anchor_match: Boolean(r.anchor_match),
+            bucket: String(r.bucket ?? ""),
+            frequency: Number(r.frequency) || 0,
+          };
+        })
+        .filter((x): x is Sig => x != null)
+    : undefined;
   return {
     dish_taxonomy: String(o.dish_taxonomy ?? "other"),
     cuisine,
@@ -266,6 +320,7 @@ function parseRecipeQuality(raw: unknown): RecipeQualityMeta | null {
     critical_tips,
     avoid_mistakes,
     ingredient_roles: ingredient_roles as { name: string; role: string }[],
+    ...(ingredient_signals?.length ? { ingredient_signals } : {}),
   };
 }
 

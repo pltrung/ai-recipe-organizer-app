@@ -163,6 +163,20 @@ export function RecipeUpdatedModal({
                 {lastDiff.summary ||
                   "Your recipe absorbed the new source — see what shifted below."}
               </p>
+              {lastDiff.merge_quality_score != null ? (
+                <p className="pl-[44px] text-sm text-neutral-500">
+                  Merge quality{" "}
+                  <span className="font-semibold text-neutral-800">
+                    {lastDiff.merge_quality_score}/100
+                  </span>
+                  {lastDiff.is_proposal_better ? " · Likely upgrade" : " · Review before applying"}
+                  {lastDiff.merge_quality_reason ? (
+                    <span className="block mt-1 text-xs text-neutral-400">
+                      {lastDiff.merge_quality_reason}
+                    </span>
+                  ) : null}
+                </p>
+              ) : null}
             </header>
 
             {/* Snapshot */}

@@ -33,6 +33,13 @@ const SYNONYM_GROUPS: { match: string[]; canonical: string }[] = [
   { match: ["kosher salt", "sea salt", "table salt"], canonical: "salt" },
   { match: ["black pepper", "freshly ground black pepper"], canonical: "black pepper" },
   { match: ["all-purpose flour", "plain flour", "ap flour"], canonical: "all-purpose flour" },
+  { match: ["cornstarch", "corn starch", "cornflour", "corn flour"], canonical: "cornstarch" },
+  {
+    match: ["chicken thigh", "chicken thighs", "boneless chicken thigh"],
+    canonical: "chicken thigh",
+  },
+  { match: ["rice vinegar", "rice wine vinegar"], canonical: "rice vinegar" },
+  { match: ["sesame oil", "toasted sesame oil"], canonical: "sesame oil" },
   { match: ["baking soda", "bicarbonate of soda"], canonical: "baking soda" },
   { match: ["baking powder"], canonical: "baking powder" },
   { match: ["unsalted butter", "salted butter"], canonical: "butter" },
@@ -174,4 +181,39 @@ export function normalizeAndDedupeGroups(ingredients: {
     core: dedupeIngredientList(ingredients.core || []),
     optional: dedupeIngredientList(ingredients.optional || []),
   };
+}
+
+const ROLE_ORDER = [
+  "structure",
+  "protein",
+  "base",
+  "coating",
+  "cooking_medium",
+  "flavor_base",
+  "flavor",
+  "richness",
+  "aroma",
+  "garnish",
+  "optional_enhancement",
+] as const;
+
+/** Sort optional (and optionally core) by role for stable UI grouping */
+export function sortIngredientsByRole(
+  ings: StructuredIngredient[],
+  roles: { name: string; role: string }[]
+): StructuredIngredient[] {
+  const roleMap = new Map<string, string>();
+  for (const r of roles) {
+    const k = normalizeIngredientName(r.name).toLowerCase();
+    if (k) roleMap.set(k, r.role.toLowerCase());
+  }
+  const rank = (name: string) => {
+    const k = normalizeIngredientName(name).toLowerCase();
+    const ro = roleMap.get(k) ?? "zzz";
+    const idx = ROLE_ORDER.indexOf(ro as (typeof ROLE_ORDER)[number]);
+    return idx >= 0 ? idx : 99;
+  };
+  return [...ings].sort(
+    (a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name)
+  );
 }
