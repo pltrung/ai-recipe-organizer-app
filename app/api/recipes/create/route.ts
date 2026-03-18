@@ -2,10 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabaseServer";
 import { classifyLink } from "@/lib/classifyLink";
 import { detectPlatform } from "@/lib/platformDetector";
-import { fetchContent } from "@/lib/extractionRouter";
-import { extractRecipe } from "@/lib/aiExtractor";
+import { ingestUrl, ingestImage } from "@/lib/sourcePipeline";
 import { mergeRecipesWithConfidence } from "@/lib/aiMerge";
-import type { Recipe, ExtractedRecipeWithConfidence } from "@/lib/types";
+import type { Recipe } from "@/lib/types";
 
 export async function POST(req: NextRequest) {
   try {
@@ -76,84 +75,77 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const sourceReports: import("@/lib/sourcePipeline").SourceExtractionReport[] =
+      [];
+    const successfulRecipes: import("@/lib/types").ExtractedRecipeWithConfidence[] =
+      [];
+    const rawTextParts: string[] = [];
     const sourceUrls: string[] = [];
     const sourcePlatforms: string[] = [];
-    const extractedWithConfidence: ExtractedRecipeWithConfidence[] = [];
-    const rawTextParts: string[] = [];
     let hasReelInput = false;
 
     for (const url of urls) {
       const u = String(url).trim();
       if (!u) continue;
-      const classification = classifyLink(u);
-      if (classification.strategy === "reel_fallback") hasReelInput = true;
+      if (classifyLink(u).strategy === "reel_fallback") hasReelInput = true;
       sourceUrls.push(u);
-      sourcePlatforms.push(classification.platform);
+      sourcePlatforms.push(classifyLink(u).platform);
 
-      const result = await fetchContent({ type: "url", value: u }, openaiKey);
-      if (!result) continue;
-      rawTextParts.push(result.raw_text);
-
-      const recipe = await extractRecipe(result.raw_text, openaiKey);
-      if (recipe && (recipe.ingredients.length > 0 || recipe.steps.length > 0)) {
-        extractedWithConfidence.push({
-          ...recipe,
-          confidence: result.confidence,
-        });
-      } else if (recipe) {
-        extractedWithConfidence.push({
-          ...recipe,
-          confidence: result.confidence,
-        });
-      }
+      const outcome = await ingestUrl(u, openaiKey);
+      sourceReports.push(outcome.report);
+      if (outcome.rawForDb) rawTextParts.push(`--- ${u} ---\n${outcome.rawForDb}`);
+      if (outcome.recipe) successfulRecipes.push(outcome.recipe);
     }
 
-    for (const imageBase64 of images) {
-      if (!imageBase64 || typeof imageBase64 !== "string") continue;
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      if (!img || typeof img !== "string") continue;
       sourcePlatforms.push("image");
-      const result = await fetchContent(
-        { type: "image", value: imageBase64 },
-        openaiKey
-      );
-      if (!result) continue;
-      rawTextParts.push(result.raw_text);
-      const recipe = await extractRecipe(result.raw_text, openaiKey);
-      if (recipe) {
-        extractedWithConfidence.push({
-          ...recipe,
-          confidence: result.confidence,
-        });
-      }
+      const outcome = await ingestImage(img, i, openaiKey);
+      sourceReports.push(outcome.report);
+      if (outcome.rawForDb) rawTextParts.push(`--- image ${i + 1} ---\n${outcome.rawForDb}`);
+      if (outcome.recipe) successfulRecipes.push(outcome.recipe);
     }
 
-    let merged: import("@/lib/types").ExtractedRecipe | null = null;
-    if (extractedWithConfidence.length > 0) {
-      merged = await mergeRecipesWithConfidence(extractedWithConfidence, openaiKey);
-    }
+    const extractedCount = sourceReports.filter((r) => r.status === "success").length;
+    const totalCount = sourceReports.length;
 
-    if (!merged) {
+    if (successfulRecipes.length === 0) {
       return NextResponse.json(
         {
           error:
-            "We couldn't extract a full recipe from your links or images. Use the form below to add ingredients and steps—we'll save it for you.",
+            "We couldn't extract a usable recipe from any source. Add ingredients and steps below—or try different links.",
           has_reel_input: hasReelInput,
+          sources: sourceReports,
+          extracted_count: extractedCount,
+          total_count: totalCount,
         },
         { status: 422 }
       );
     }
 
-    const title = dishName && dishName.length > 0 ? dishName : merged.title;
+    let merged: import("@/lib/types").ExtractedRecipe | null = null;
+    if (successfulRecipes.length === 1) {
+      merged = successfulRecipes[0];
+    } else {
+      merged = await mergeRecipesWithConfidence(successfulRecipes, openaiKey);
+      if (!merged) {
+        merged = successfulRecipes[0];
+      }
+    }
+
+    const title = dishName && dishName.length > 0 ? dishName : merged!.title;
     const recipeRow: Omit<Recipe, "id" | "created_at"> = {
       user_id: body.user_id ?? null,
       title,
-      description: merged.description,
-      ingredients: merged.ingredients,
-      steps: merged.steps,
-      estimated_time: merged.estimated_time,
-      servings: merged.servings,
+      description: merged!.description,
+      ingredients: merged!.ingredients,
+      steps: merged!.steps,
+      estimated_time: merged!.estimated_time,
+      servings: merged!.servings,
       source_urls: sourceUrls,
       source_platforms: sourcePlatforms,
-      raw_text: rawTextParts.join("\n\n---\n\n"),
+      raw_text: rawTextParts.join("\n\n") || undefined,
     };
 
     const supabase = createServerClient();
@@ -181,15 +173,16 @@ export async function POST(req: NextRequest) {
         { status: 500 }
       );
     }
+
     return NextResponse.json({
       id: data.id,
       from_reel: hasReelInput,
+      sources: sourceReports,
+      extracted_count: extractedCount,
+      total_count: totalCount,
     });
   } catch (e) {
     console.error(e);
-    return NextResponse.json(
-      { error: "Server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 }

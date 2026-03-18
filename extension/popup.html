@@ -69,13 +69,25 @@
         background: #fef2f2;
         color: #b91c1c;
       }
+      a.settings {
+        display: block;
+        margin-top: 10px;
+        font-size: 12px;
+        color: #525252;
+      }
+      .hint {
+        font-size: 11px;
+        color: #737373;
+        margin-bottom: 12px;
+      }
     </style>
   </head>
   <body>
     <h1>Recipe Cloud</h1>
-    <p>Save the recipe from this tab. Make sure the app is running on localhost:3000.</p>
+    <p id="backend-hint" class="hint"></p>
     <button type="button" id="save">Save recipe from this page</button>
     <div id="status" role="status"></div>
+    <a href="#" id="open-options" class="settings">Extension settings (API URL)</a>
     <script src="popup.js"></script>
   </body>
 </html>

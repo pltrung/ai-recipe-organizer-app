@@ -33,6 +33,21 @@ export default function CreatePage() {
   const [fallbackIngredients, setFallbackIngredients] = useState("");
   const [fallbackSteps, setFallbackSteps] = useState("");
   const [fromReel, setFromReel] = useState(false);
+  const [resultSummary, setResultSummary] = useState<{
+    recipeId: string;
+    from_reel: boolean;
+    sources: {
+      source_url: string;
+      platform: string;
+      status: string;
+      error?: string;
+    }[];
+    extracted_count: number;
+    total_count: number;
+  } | null>(null);
+  const [failedSources, setFailedSources] = useState<
+    { source_url: string; platform: string; status: string; error?: string }[]
+  >([]);
 
   function addLink() {
     setUrls((prev) => [...prev, ""]);
@@ -109,9 +124,18 @@ export default function CreatePage() {
         if (res.status === 422) {
           setFromReel(!!data.has_reel_input);
           setFallbackMode(true);
+          const src = Array.isArray(data.sources) ? data.sources : [];
+          setFailedSources(src);
+          const x = data.extracted_count ?? 0;
+          const y = data.total_count ?? src.length;
+          const prefix =
+            y > 0
+              ? `We extracted ${x} of ${y} sources. `
+              : "";
           setError(
-            data.error ||
-              "We couldn't extract a full recipe. You can complete it below."
+            prefix +
+              (data.error ||
+                "Complete the recipe below using your best notes from the links.")
           );
         } else {
           setError(data.error || "Something went wrong.");
@@ -120,8 +144,14 @@ export default function CreatePage() {
         return;
       }
       if (data.id) {
-        const q = data.from_reel ? "?from_reel=1" : "";
-        router.push(`/recipe/${data.id}${q}`);
+        setLoading(false);
+        setResultSummary({
+          recipeId: data.id,
+          from_reel: !!data.from_reel,
+          sources: Array.isArray(data.sources) ? data.sources : [],
+          extracted_count: data.extracted_count ?? 1,
+          total_count: data.total_count ?? 1,
+        });
         return;
       }
       setError("No recipe ID returned.");
@@ -136,6 +166,74 @@ export default function CreatePage() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-[#fafafa] px-4">
         <LoadingState step={loadingStep} />
+      </div>
+    );
+  }
+
+  if (resultSummary) {
+    const q = resultSummary.from_reel ? "?from_reel=1" : "";
+    return (
+      <div className="min-h-screen bg-[#fafafa] px-4 py-10">
+        <div className="mx-auto max-w-lg">
+          <Link
+            href="/"
+            className="text-sm font-medium text-neutral-600 hover:text-neutral-900"
+          >
+            ← Recipe Cloud
+          </Link>
+          <h1 className="mt-6 text-xl font-semibold text-neutral-900">
+            Recipe saved
+          </h1>
+          <p className="mt-2 text-neutral-600">
+            We extracted{" "}
+            <strong>
+              {resultSummary.extracted_count} of {resultSummary.total_count}
+            </strong>{" "}
+            sources.
+          </p>
+          {resultSummary.sources.length > 0 && (
+            <ul className="mt-4 space-y-2 rounded-2xl border border-neutral-100 bg-white p-4 shadow-sm">
+              {resultSummary.sources.map((s, i) => (
+                <li
+                  key={i}
+                  className="flex flex-col gap-0.5 border-b border-neutral-50 pb-2 text-sm last:border-0 last:pb-0"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={
+                        s.status === "success"
+                          ? "text-green-600"
+                          : "text-red-500"
+                      }
+                    >
+                      {s.status === "success" ? "✓" : "✗"}
+                    </span>
+                    <span className="truncate font-medium text-neutral-800">
+                      {s.source_url.length > 48
+                        ? s.source_url.slice(0, 46) + "…"
+                        : s.source_url}
+                    </span>
+                    <span className="shrink-0 text-xs text-neutral-400">
+                      {s.platform}
+                    </span>
+                  </div>
+                  {s.status === "failed" && s.error && (
+                    <p className="ml-6 text-xs text-neutral-500">{s.error}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            onClick={() =>
+              router.push(`/recipe/${resultSummary.recipeId}${q}`)
+            }
+            className="mt-6 w-full rounded-2xl bg-neutral-900 py-3 text-sm font-medium text-white hover:bg-neutral-800"
+          >
+            Open recipe
+          </button>
+        </div>
       </div>
     );
   }
@@ -165,6 +263,21 @@ export default function CreatePage() {
           </h2>
           {error && (
             <p className="mt-2 text-sm text-amber-700">{error}</p>
+          )}
+          {failedSources.length > 0 && (
+            <ul className="mt-4 space-y-2 rounded-xl border border-neutral-200 bg-white p-3 text-sm">
+              {failedSources.map((s, i) => (
+                <li key={i} className="text-neutral-600">
+                  <span className="text-red-500">✗</span>{" "}
+                  <span className="truncate">{s.source_url}</span>
+                  {s.error && (
+                    <span className="block pl-4 text-xs text-neutral-500">
+                      {s.error}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
           )}
           <div className="mt-6 space-y-4">
             <div>
@@ -209,6 +322,7 @@ export default function CreatePage() {
                 onClick={() => {
                   setFallbackMode(false);
                   setError(null);
+                  setFailedSources([]);
                 }}
                 className="rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
               >

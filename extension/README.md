@@ -42,10 +42,18 @@ Click the puzzle icon in the Chrome toolbar → pin "Recipe Cloud" so the icon i
 2. Click the **Recipe Cloud** icon → in the popup, click **Save recipe from this page**
 3. A **new tab** should open with your saved recipe (or a draft you can edit)
 
+### `Failed to fetch` / `TypeError: Failed to fetch` (Chrome extension errors)
+
+That means the extension **could not reach your Recipe Cloud API** (not a bug in the recipe page).
+
+1. **Local dev** – Run `npm run dev` so the app is on port **3000**. The extension tries **127.0.0.1:3000** first, then **localhost:3000**.
+2. **Using Vercel (or another URL)** – Right‑click the extension → **Options** (or open **Extension settings** from the popup). Enter your app URL (e.g. `https://your-app.vercel.app`), click **Save & allow access**, and approve the permission prompt.
+3. Reload the extension after changing **manifest.json** (`chrome://extensions` → Reload).
+
 ### If something goes wrong
 
 - **"Could not read this page"** – Some pages (e.g. chrome://) can’t be scripted. Use a normal recipe webpage.
-- **"Could not reach the server"** – Make sure the Next.js app is running on `http://localhost:3000`.
+- **"Could not reach the server"** – Start the app on port 3000 or set the correct URL in extension options.
 - **Recipe is empty or wrong** – Use "Edit" on the recipe page to fix it. The extension always saves something so you never lose the link.
 
 ### Production (e.g. Vercel)

@@ -1,80 +1,28 @@
-import { load } from "cheerio";
 import type { Confidence, ExtractionResult } from "./types";
-
-const BROWSER_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-};
+import { extractWebsite } from "./websiteExtract";
 
 const FETCH_OPTS = {
-  headers: BROWSER_HEADERS,
+  headers: {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+  },
   signal: AbortSignal.timeout(20000),
 };
 
 /**
- * A. HTML_PARSE — High confidence. Use cheerio to extract clean main content.
+ * A. HTML_PARSE — JSON-LD, Readability, cheerio sections (see websiteExtract).
  */
 export async function strategyHtmlParse(url: string): Promise<ExtractionResult | null> {
-  try {
-    const res = await fetch(url, FETCH_OPTS);
-    if (!res.ok) return null;
-    const html = await res.text();
-    const $ = load(html);
-
-    $("script, style, nav, footer, header, iframe, noscript").remove();
-    const mainSel = $("main, article, [role='main'], .content, .post-content, .recipe, .entry-content");
-    const main = mainSel.length > 0 ? mainSel.first() : $("body");
-    let text = main.text();
-    if (!text || text.trim().length < 100) {
-      text = $("body").text();
-    }
-    text = text.replace(/\s+/g, " ").trim().slice(0, 50000);
-
-    const jsonLd = extractJsonLdRecipe(html);
-    const raw_text = jsonLd || text;
-    if (!raw_text || raw_text.length < 50) return null;
-    return { raw_text, confidence: "high", source_label: "Blog / webpage" };
-  } catch {
-    return null;
-  }
-}
-
-function extractJsonLdRecipe(html: string): string | null {
-  const re =
-    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(html)) !== null) {
-    try {
-      const json = JSON.parse(match[1].trim());
-      const items = Array.isArray(json) ? json : [json];
-      for (const item of items) {
-        if (item["@type"] === "Recipe" || item["@type"]?.includes?.("Recipe")) {
-          const name = item.name ?? item.title ?? "Recipe";
-          const ing = item.recipeIngredient ?? item.ingredients ?? [];
-          const steps = item.recipeInstructions ?? item.instructions ?? [];
-          const stepText = steps.map((s: { text?: string; name?: string }) =>
-            typeof s === "string" ? s : s?.text ?? s?.name ?? ""
-          );
-          return [
-            `Recipe: ${name}`,
-            item.description ? `Description: ${item.description}` : "",
-            "Ingredients:",
-            ...(Array.isArray(ing) ? ing.map((i: string) => `- ${i}`) : []),
-            "Instructions:",
-            ...stepText.map((t: string, i: number) => `${i + 1}. ${t}`),
-          ]
-            .filter(Boolean)
-            .join("\n");
-        }
-      }
-    } catch {
-      /* skip */
-    }
-  }
-  return null;
+  const w = await extractWebsite(url);
+  if (!w.ok) return null;
+  return {
+    raw_text: w.raw_text,
+    confidence: w.confidence,
+    source_label: "Blog / webpage",
+  };
 }
 
 export function extractYouTubeVideoId(url: string): string | null {

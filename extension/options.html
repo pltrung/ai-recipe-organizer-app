@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Recipe Cloud — Settings</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 420px;
+        padding: 20px;
+        font-size: 14px;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      input {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        box-sizing: border-box;
+      }
+      button {
+        margin-top: 12px;
+        padding: 10px 16px;
+        background: #171717;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      #msg {
+        margin-top: 12px;
+        font-size: 13px;
+      }
+      .ok {
+        color: #047857;
+      }
+      .err {
+        color: #b91c1c;
+      }
+      p.hint {
+        color: #666;
+        font-size: 12px;
+        margin-top: 8px;
+        line-height: 1.4;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Recipe Cloud</h2>
+    <p class="hint">
+      The extension must reach your Recipe Cloud app. Use local dev or your
+      deployed URL (no trailing slash).
+    </p>
+    <label for="base">App base URL</label>
+    <input
+      id="base"
+      type="url"
+      placeholder="http://localhost:3000 or https://your-app.vercel.app"
+    />
+    <button type="button" id="save">Save &amp; allow access</button>
+    <div id="msg"></div>
+    <script src="options.js"></script>
+  </body>
+</html>

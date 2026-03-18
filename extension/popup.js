@@ -1,10 +1,47 @@
-const BACKEND_BASE = "http://localhost:3000";
+const DEFAULT_BASES = ["http://127.0.0.1:3000", "http://localhost:3000"];
 
 function setStatus(msg, type) {
   const el = document.getElementById("status");
   el.textContent = msg;
   el.className = "show " + (type || "info");
 }
+
+async function getBackendBase() {
+  const { apiBase } = await chrome.storage.local.get("apiBase");
+  if (apiBase && String(apiBase).trim()) {
+    return String(apiBase).trim().replace(/\/$/, "");
+  }
+  return null;
+}
+
+async function fetchWithFallback(path, options) {
+  const custom = await getBackendBase();
+  const bases = custom ? [custom] : DEFAULT_BASES;
+  let lastErr = null;
+  for (const base of bases) {
+    try {
+      const res = await fetch(`${base}${path}`, options);
+      return { res, base };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Failed to fetch");
+}
+
+function openOptions(e) {
+  e.preventDefault();
+  chrome.runtime.openOptionsPage();
+}
+
+document.getElementById("open-options").addEventListener("click", openOptions);
+
+(async function initHint() {
+  const b = await getBackendBase();
+  document.getElementById("backend-hint").textContent = b
+    ? `API: ${b}`
+    : "API: 127.0.0.1:3000 (then localhost). Use settings for Vercel.";
+})();
 
 function extractPageContent() {
   const selectors =
@@ -106,32 +143,43 @@ document.getElementById("save").addEventListener("click", async () => {
 
     setStatus("Saving to Recipe Cloud…", "info");
 
-    const res = await fetch(`${BACKEND_BASE}/api/extract-from-extension`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    let usedBase;
+    let res;
+    try {
+      const out = await fetchWithFallback("/api/extract-from-extension", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      res = out.res;
+      usedBase = out.base;
+    } catch (fetchErr) {
+      setStatus(
+        "Can’t reach Recipe Cloud. Start the app: npm run dev (port 3000). Or open Extension settings and set your Vercel URL, then Save.",
+        "err"
+      );
+      btn.disabled = false;
+      return;
+    }
 
     const data = await res.json().catch(() => ({}));
     if (data.recipeId) {
       setStatus("Opening your recipe…", "ok");
       await chrome.tabs.create({
-        url: `${BACKEND_BASE}/recipe/${data.recipeId}`,
+        url: `${usedBase}/recipe/${data.recipeId}`,
       });
       window.close();
       return;
     }
 
     setStatus(
-      data.error || "Server error. Is Recipe Cloud running on localhost:3000?",
+      data.error ||
+        "Server returned an error. Check the app is running and env vars are set.",
       "err"
     );
   } catch (e) {
     console.error(e);
-    setStatus(
-      "Could not connect. Start the app (npm run dev) and try again.",
-      "err"
-    );
+    setStatus("Something went wrong. Try Extension settings → set API URL.", "err");
   }
   btn.disabled = false;
 });
