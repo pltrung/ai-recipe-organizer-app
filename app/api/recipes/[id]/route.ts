@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { createServerClient } from "@/lib/supabaseServer";
 import { EXTENSION_CORS_HEADERS } from "@/lib/extensionCors";
 
@@ -27,6 +28,7 @@ export async function DELETE(
         { status: 500, headers: EXTENSION_CORS_HEADERS }
       );
     }
+    revalidatePath("/dashboard");
     return NextResponse.json({ ok: true }, { headers: EXTENSION_CORS_HEADERS });
   } catch (e) {
     console.error(e);

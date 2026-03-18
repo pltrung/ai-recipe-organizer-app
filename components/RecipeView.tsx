@@ -78,6 +78,9 @@ export function RecipeView({
   const optional = recipe.ingredients?.optional ?? EMPTY_ING;
   const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
   const tips = Array.isArray(recipe.tips) ? recipe.tips : [];
+  const substitutions = Array.isArray(recipe.substitutions)
+    ? recipe.substitutions
+    : [];
   const sourceUrls = Array.isArray(recipe.source_urls) ? recipe.source_urls : [];
   const ingTotal = core.length + optional.length;
   const isEmpty = ingTotal === 0 && steps.length === 0;
@@ -301,6 +304,22 @@ export function RecipeView({
           </div>
         )}
       </section>
+
+      {substitutions.length > 0 && (
+        <section className="mb-10 rounded-2xl border border-amber-100 bg-amber-50/60 px-5 py-4">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-amber-900">
+            Substitutions
+          </h2>
+          <ul className="space-y-2 text-sm text-amber-950">
+            {substitutions.map((line, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="text-amber-600">↔</span>
+                <span>{line}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="mb-10">
         <h2 className="mb-3 text-sm font-medium uppercase tracking-wider text-neutral-500">

@@ -28,6 +28,11 @@ export function parseTipsFromDb(raw: unknown): string[] {
   return raw.map((x) => String(x).trim()).filter(Boolean);
 }
 
+export function parseSubstitutionsFromDb(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((x) => String(x).trim()).filter(Boolean);
+}
+
 export function recipeFromDbRow(data: Record<string, unknown>): Recipe {
   const ing = parseIngredientsFromDb(data.ingredients);
   const sbRaw = data.servings_base;
@@ -48,6 +53,7 @@ export function recipeFromDbRow(data: Record<string, unknown>): Recipe {
       ? data.steps.map((x) => String(x).trim()).filter(Boolean)
       : [],
     tips: parseTipsFromDb(data.tips),
+    substitutions: parseSubstitutionsFromDb(data.substitutions),
     estimated_time: String(data.estimated_time ?? ""),
     servings: String(data.servings ?? "").trim() || servingsDisplayLabel(servings_base),
     servings_base,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -18,12 +18,18 @@ export function DashboardClient({ recipes }: { recipes: DashboardRecipeRow[] }) 
   const [deleting, setDeleting] = useState(false);
   const router = useRouter();
 
+  // Sync list when server sends fresh data (e.g. after navigating back to dashboard)
+  useEffect(() => {
+    setList(recipes);
+  }, [recipes]);
+
   async function confirmDelete() {
     if (!confirmId) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/recipes/${confirmId}`, { method: "DELETE" });
-      if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && (data.ok === true || !data.error)) {
         setList((prev) => prev.filter((r) => r.id !== confirmId));
         setConfirmId(null);
         router.refresh();

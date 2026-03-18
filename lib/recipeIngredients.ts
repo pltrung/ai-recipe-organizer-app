@@ -124,3 +124,31 @@ export function groupIngredientsBySourceOverlap(
 
   return { core, optional };
 }
+
+/** Format structured ingredient for display (original line preferred). */
+function ingredientDisplayLine(i: StructuredIngredient): string {
+  return (i.original || i.name || "").trim() || "";
+}
+
+/**
+ * Build a deduplicated, cleaned list of ingredient lines for the chef AI pass.
+ * Dedupes by normalized name, trims noise, caps size.
+ */
+export function buildCleanedIngredientLinesForChef(
+  sources: ExtractedRecipeWithConfidence[],
+  maxLines = 50
+): string[] {
+  const { core, optional } = groupIngredientsBySourceOverlap(sources);
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const i of [...core, ...optional]) {
+    const line = ingredientDisplayLine(i);
+    if (!line) continue;
+    const k = normalizeIngredientKey(line);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    lines.push(line.trim());
+    if (lines.length >= maxLines) break;
+  }
+  return lines;
+}

@@ -74,6 +74,8 @@ export interface Recipe {
   steps: string[];
   /** Chef tips / enhancements from merged sources */
   tips: string[];
+  /** Suggested alternatives (e.g. "Fish sauce: use soy sauce if unavailable") */
+  substitutions: string[];
   estimated_time: string;
   servings: string;
   /** Base serving count for ingredient scaling */
@@ -95,6 +97,7 @@ export interface RecipeRow {
   ingredients: Record<string, unknown>;
   steps: Record<string, unknown>;
   tips?: unknown;
+  substitutions?: unknown;
   estimated_time: string;
   servings: string;
   servings_base?: number;
