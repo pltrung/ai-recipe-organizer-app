@@ -44,6 +44,13 @@ import {
   playbookForPhaseD,
 } from "./dynamicPlaybook";
 import {
+  buildConfidenceSummary,
+  canonicalizeStepFlow,
+  ensureCanonicalPlanHasStages,
+  formatCanonicalPlanForPhaseD,
+  stepActionFingerprint,
+} from "./stepFlowCanonicalization";
+import {
   type SourceConfidence,
   confidenceFromPlatformRaw,
 } from "./sourceSynthesisConfidence";
@@ -971,49 +978,6 @@ function stepBand(coreCount: number): { min: number; max: number; label: string 
   return { min: 10, max: 14, label: "complex" };
 }
 
-/** Before Phase D: pick dominant storyline; secondary → tips only (never step lists). */
-async function phaseDStepFlowHint(
-  openai: InstanceType<typeof import("openai").default>,
-  extractions: PerSourceExtraction[],
-  chunks: SourceChunk[]
-): Promise<{ narrative: string; extraTipIdeas: string[] }> {
-  const blocks: string[] = [];
-  for (let i = 0; i < extractions.length && i < chunks.length; i++) {
-    const conf = chunks[i]?.confidence ?? "medium";
-    const sc = extractions[i]!.step_candidates.slice(0, 14).filter(Boolean);
-    if (!sc.length) continue;
-    blocks.push(
-      `[Source ${i} confidence=${conf}]\n${sc.map((s, j) => `${j + 1}. ${s}`).join("\n")}`
-    );
-  }
-  if (blocks.length === 0) return { narrative: "", extraTipIdeas: [] };
-  const p = await chatJson(
-    openai,
-    `You see procedural FRAGMENTS from multiple web/video sources. They often CONFLICT or duplicate.
-
-Return STRICT JSON:
-{
-  "dominant_one_liner": string,
-  "secondary_as_tips_only": string[]
-}
-
-dominant_one_liner: ONE sentence describing the single best default cooking story (prefer high/medium-confidence sources over low).
-secondary_as_tips_only: up to 6 short notes (alt timing, optional tweak) — NOT steps.
-
-Do NOT output recipe steps or numbered procedures.`,
-    blocks.join("\n\n---\n\n").slice(0, 14_000)
-  );
-  if (!p) return { narrative: "", extraTipIdeas: [] };
-  const narrative = String(p.dominant_one_liner ?? "").trim().slice(0, 400);
-  const extra = Array.isArray(p.secondary_as_tips_only)
-    ? (p.secondary_as_tips_only as unknown[])
-        .map((x) => String(x).trim())
-        .filter(Boolean)
-        .slice(0, 6)
-    : [];
-  return { narrative, extraTipIdeas: extra };
-}
-
 function isBannedSectionTitle(title: string): boolean {
   const t = title.trim().toLowerCase();
   if (
@@ -1030,7 +994,74 @@ function isBannedSectionTitle(title: string): boolean {
     return true;
   if (/^before\s+(you\s+)?(start|begin)/.test(t)) return true;
   if (/^prep\s*:/.test(t) || /^preparation\s*$/i.test(t)) return true;
+  if (/^to\s+the\s+/.test(t)) return true;
+  if (/^for\s+serving|^to\s+serve\b/.test(t)) return true;
   return false;
+}
+
+function detectMultiRecipeMergeIssues(steps: RecipeStep[]): string[] {
+  const issues: string[] = [];
+  const n = steps.length;
+  const bodies = steps.map((s) =>
+    `${s.title} ${s.instructions}`.toLowerCase()
+  );
+  const fps = steps.map((s) => stepActionFingerprint(`${s.title} ${s.instructions}`));
+  const countFp = (fp: string) => fps.filter((x) => x === fp).length;
+  if (countFp("fry") >= 3) {
+    issues.push(
+      "Multiple distinct fry steps detected — consolidate into ONE fry phase (one recipe, not stacked sources)."
+    );
+  }
+  if (countFp("marinate") >= 2) {
+    issues.push(
+      "Duplicate marinate/prep phases — merge into a single marinate step."
+    );
+  }
+  if (countFp("heat_oil") >= 2 && countFp("fry") >= 2) {
+    issues.push(
+      "Repeated heat-oil-then-fry cycles — keep one oil heat + one fry step only."
+    );
+  }
+
+  if (n >= 10) {
+    const half = Math.floor(n / 2);
+    let similarPairs = 0;
+    for (let i = 0; i < half; i++) {
+      const a = bodies[i]!.replace(/\s+/g, " ").slice(0, 120);
+      const b = bodies[i + half]!.replace(/\s+/g, " ").slice(0, 120);
+      if (a.length < 30 || b.length < 30) continue;
+      const wa = new Set(
+        a.split(/\W+/).filter((w) => w.length > 4)
+      );
+      let hit = 0;
+      for (const w of b.split(/\W+/)) {
+        if (w.length > 4 && wa.has(w)) hit++;
+      }
+      if (hit >= 4) similarPairs++;
+    }
+    if (similarPairs >= 3) {
+      issues.push(
+        "Step list looks like two copies of the same flow merged — output exactly ONE linear sequence."
+      );
+    }
+  }
+
+  let prepLike = 0;
+  for (const s of steps) {
+    const x = `${s.title} ${s.instructions}`.toLowerCase();
+    if (
+      /first,|next,|then,|meanwhile|in a separate|for the (sauce|marinade)/i.test(
+        x
+      )
+    )
+      prepLike++;
+  }
+  if (prepLike >= 4 && n >= 12) {
+    issues.push(
+      "Too many blog-style asides — rewrite as direct imperative steps only."
+    );
+  }
+  return issues;
 }
 
 function stepBodyText(s: RecipeStep): string {
@@ -1084,9 +1115,21 @@ function collectStepValidationIssues(
   const orderMsg = validateSingleFlowOrder(steps);
   if (orderMsg) issues.push(orderMsg);
 
+  issues.push(...detectMultiRecipeMergeIssues(steps));
+
   const normTitles = steps.map((s) => s.title.toLowerCase().replace(/\s+/g, " ").trim());
   if (new Set(normTitles).size !== normTitles.length) {
     issues.push("Duplicate step titles — ONE step per action; merge duplicates.");
+  }
+
+  const titleFp = steps.map((s) => stepActionFingerprint(s.title));
+  const dupTitleAction = titleFp.filter(
+    (fp, i) => fp !== "other" && titleFp.indexOf(fp) !== i
+  );
+  if (dupTitleAction.length >= 2) {
+    issues.push(
+      "Repeated action in step titles (e.g. multiple 'Fry' steps) — merge into one step per phase."
+    );
   }
 
   const bodies = steps.map((s) =>
@@ -1138,22 +1181,19 @@ function collectStepValidationIssues(
 async function phaseDAuthoring(
   openai: InstanceType<typeof import("openai").default>,
   profile: DishProfile,
-  playbookD: string,
+  /** Playbook + expected_flow + failure points + roles (single block) */
+  playbookBlock: string,
   dishFamilyLabel: string,
   core: StructuredIngredient[],
   optional: StructuredIngredient[],
-  rolesLines: string,
   dCtx: {
-    subsLines: string;
-    variantNotes: string[];
-    tipIdeas: string[];
-    failurePoints: string[];
-    /** Dominant flow one-liner — orientation only, not steps to copy */
-    sourceFlowNarrative: string;
+    canonicalStepPlanBlock: string;
+    canonTips: string[];
+    canonWarnings: string[];
+    canonVariants: string[];
   },
   synthesisStyle: SynthesisStyle,
   band: { min: number; max: number },
-  expectedFlowLines: string[],
   fixHint?: string
 ): Promise<{
   summary: string;
@@ -1169,96 +1209,85 @@ async function phaseDAuthoring(
   ].join("\n");
   const coreNames = core.map((c) => c.name).join(", ");
   const familyMandatory = familyMandatoryHintsDetailed(dishFamilyLabel);
-  const flowBlock =
-    expectedFlowLines.length > 0
-      ? expectedFlowLines.map((s, i) => `${i + 1}. ${s}`).join("\n")
-      : "(follow dish logic)";
 
-  const system = `You write ONE canonical recipe for Recipe Cloud — a single chef-authored flow.
+  if (!dCtx.canonicalStepPlanBlock?.trim()) {
+    console.error(
+      "[synthesis-phased:canonical-flow] FATAL: Phase D invoked without canonical_step_plan — raw step_candidates must not author steps directly"
+    );
+    return null;
+  }
 
-STRICT — SOURCE MATERIAL:
-- Do NOT copy, paste, or stitch together step_candidates / procedural fragments from sources.
-- Do NOT follow multiple blog timelines in parallel. Generate a NEW unified sequence from scratch.
-- Inputs you MAY use: finalized ingredients (below), EXPECTED_FLOW, ingredient_roles, playbook, and the one-line ORIENTATION sentence only (it is not a step list).
+  const tipsCanon =
+    dCtx.canonTips.length > 0
+      ? dCtx.canonTips.map((t, i) => `${i + 1}. ${t}`).join("\n")
+      : "(none)";
+  const warnCanon =
+    dCtx.canonWarnings.length > 0
+      ? dCtx.canonWarnings.map((t, i) => `${i + 1}. ${t}`).join("\n")
+      : "(none)";
+  const varCanon =
+    dCtx.canonVariants.length > 0
+      ? dCtx.canonVariants.map((t, i) => `${i + 1}. ${t}`).join("\n")
+      : "(none)";
 
-SINGLE FLOW:
-- If sources disagreed, you already chose one dominant story in ORIENTATION. Implement THAT ONE flow only.
-- Merge useful ideas (timing, warnings) into the same sequence — never output two alternate step paths.
+  const validationRetry = fixHint
+    ? `
 
-BANNED step titles (blog sections — rewrite as actions):
-- No "To marinate", "To fry", "For the sauce", "Before you start", "Prep:", section headers.
-- Each title = short direct action: "Marinate the chicken", "Fry until golden".
+--- VALIDATION FAILED — OUTPUT A COMPLETELY NEW steps ARRAY ---
+${fixHint}
+
+You must fix EVERY issue listed. Do not preserve the bad structure. Target 6–9 unique actionable steps (max 12). One linear flow only. No section-style titles. Every core ingredient must appear in step text. Paraphrase in fresh chef voice — do not reuse source blog phrasing.`
+    : "";
+
+  const system = `You are the final step author for Recipe Cloud. You receive ONLY:
+(1) finalized ingredient list, (2) dynamic playbook block, (3) CANONICAL_STEP_PLAN.dominant_flow, (4) canonical tip/warning/variant lines.
+
+FORBIDDEN:
+- Raw multi-source step lists do not exist for you. If you invent a second full recipe or parallel method as steps, you have failed.
+- Do NOT copy blog/article section headers as titles ("To marinate", "To fry", "For the sauce", "Before you start").
+- Do NOT preserve multiple merged source timelines.
+
+REQUIRED:
+- Exactly ONE canonical cooking flow. 6–9 steps target; hard max 12.
+- Each step: short imperative title + 1–3 sentence instructions. Actionable only.
+- Map to CANONICAL_STEP_PLAN stages in order; compress stages into steps without duplicating the whole sequence twice.
+- Alternatives from canon variants → tips, critical_tips, avoid_mistakes, or step warnings only — never a second fry/marinate sequence.
+- Use your own phrasing (chef voice), not pasted source sentences.
+- Every core ingredient must appear somewhere in step bodies: [${coreNames}]. Water/salt/oil allowed.
+
+${playbookBlock}
+
+FAMILY CHECKLIST: ${familyMandatory}
+
+STYLE ${synthesisStyle}: ${STYLE_GUIDE[synthesisStyle]}
 
 Return STRICT JSON:
 {
   "summary": string (≤2 sentences),
   "servings": number,
-  "steps": [{
-    "title": string,
-    "instructions": string,
-    "duration_minutes": number,
-    "tools": string[],
-    "warnings": string[]
-  }],
+  "steps": [{ "title": string, "instructions": string, "duration_minutes": number, "tools": string[], "warnings": string[] }],
   "tips": string[],
   "critical_tips": string[],
   "avoid_mistakes": string[]
-}
-
-STEP RULES:
-- Minimum ${band.min} steps, target 6–9, maximum 12. If you exceed ${band.max}, merge redundant steps (e.g. multiple fry steps → one fry step; multiple marinade notes → one marinate step).
-- instructions: ONE string, 1–3 sentences max. No bullet lists inside. No duplicated paragraphs.
-- Collapse similar actions across imagined sources into ONE clearer step.
-- Follow EXPECTED_FLOW order. One main action per step.
-- duration_minutes: realistic; or 0 only if text has clear condition ("until golden").
-- warnings: 0–2 per step, real risks only.
-- Name every core ingredient somewhere across steps: [${coreNames}].
-- Only listed ingredients + water/salt/oil.
-
-${playbookD}
-
-FAMILY CHECKLIST: ${familyMandatory}
-
-STYLE ${synthesisStyle}: ${STYLE_GUIDE[synthesisStyle]}`;
-
-  const tipBlock =
-    dCtx.tipIdeas.length > 0
-      ? dCtx.tipIdeas.map((t, i) => `${i + 1}. ${t}`).join("\n")
-      : "(none)";
-  const failBlock = dCtx.failurePoints.length
-    ? dCtx.failurePoints.join("\n- ")
-    : "(none)";
-
-  const orient =
-    dCtx.sourceFlowNarrative.trim() ||
-    "(No multi-source fragment summary — infer one flow from dish + ingredients + playbook.)";
+}`;
 
   const user = `DISH: ${profile.canonical_dish_name} (${profile.cuisine_style}) | family: ${dishFamilyLabel}
 
-ORIENTATION — dominant storyline only (NOT steps to copy; write fresh steps from ingredients + flow):
-${orient}
-
-EXPECTED_FLOW — your single recipe must follow this order (merge beats into one step where needed):
-${flowBlock}
-
-INGREDIENT ROLES:
-${rolesLines || "(none)"}
-
-FINALIZED INGREDIENTS (Phase C — sole ingredient truth):
+FINALIZED INGREDIENTS:
 ${ingList}
 
-SUBSTITUTIONS (if cook swaps):
-${dCtx.subsLines || "(none)"}
+CANONICAL_STEP_PLAN — dominant_flow (MANDATORY spine; author steps ONLY along this single timeline):
+${dCtx.canonicalStepPlanBlock.trim()}
 
-VARIANT NOTES:
-${dCtx.variantNotes.length ? dCtx.variantNotes.map((v, i) => `${i + 1}. ${v}`).join("\n") : "(none)"}
+CANONICAL tip_candidates (fold into tips/critical_tips — NOT extra step flows):
+${tipsCanon}
 
-TIP / WARNING IDEAS — fold into critical_tips, avoid_mistakes, tips, or step warnings; never as extra step sequences:
-${tipBlock}
+CANONICAL warning_candidates (fold into avoid_mistakes / step warnings):
+${warnCanon}
 
-PLAYBOOK FAILURE POINTS:
-- ${failBlock}
-${fixHint ? `\n\nVALIDATION FIX (required):\n${fixHint}` : ""}`;
+CANONICAL variant_candidates (alternatives as tips/notes — NOT parallel step methods):
+${varCanon}
+${validationRetry}`;
 
   const p = await chatJson(openai, system, user);
   if (!p) return null;
@@ -1687,7 +1716,7 @@ export async function synthesizeRecipePhased(
     break;
   }
 
-  if (!phaseC || phaseC.core.length === 0) return null;
+  if (!phaseC) return null;
 
   let {
     core,
@@ -1697,6 +1726,15 @@ export async function synthesizeRecipePhased(
     variant_notes,
     rejected_or_noise,
   } = phaseC;
+
+  if (core.length === 0 && optional.length >= 3) {
+    console.warn(
+      "[synthesis-phased:C] empty core after scoring — promoting optional lines to core (merge recovery)"
+    );
+    core = optional.slice(0, 10);
+    optional = optional.slice(10);
+  }
+  if (core.length === 0) return null;
 
   const enforced = enforceAnchorsInCore(core, optional, materializedAnchors);
   core = enforced.core;
@@ -1750,24 +1788,49 @@ export async function synthesizeRecipePhased(
   );
   const rolesLines = roleRows.map((r) => `${r.name}: ${r.role}`).join("\n");
 
-  const subsLines = subs
-    .map((s) => {
-      const opts = (s.options ?? []).join(" · ");
-      return `${s.ingredient} → ${opts}${s.note ? ` (${s.note})` : ""}`;
-    })
-    .join("\n");
-
-  const flowHint = await phaseDStepFlowHint(openai, extractions, nonEmpty);
-  console.log(
-    `[synthesis-phased:D] flow_hint len=${flowHint.narrative.length} secondary_tips=${flowHint.extraTipIdeas.length}`
+  const flowConfSummary = buildConfidenceSummary(nonEmpty);
+  const canonRes = await canonicalizeStepFlow(openai, {
+    extractions,
+    chunks: nonEmpty,
+    expectedFlow: dynamicPb.expected_flow ?? [],
+    dishFamily: dynamicPb.dish_family,
+    dishName: profile.canonical_dish_name,
+    coreIngredients: core,
+    confidenceSummary: flowConfSummary,
+  });
+  let canonicalPlan = ensureCanonicalPlanHasStages(
+    canonRes.plan,
+    dynamicPb.expected_flow ?? [],
+    profile.canonical_dish_name || fallbackTitle
   );
+  const canonicalBlock = formatCanonicalPlanForPhaseD(canonicalPlan);
+
+  const playbookBlock = [
+    playbookD,
+    (dynamicPb.expected_flow ?? []).length
+      ? `EXPECTED_FLOW:\n${(dynamicPb.expected_flow ?? []).map((s, i) => `${i + 1}. ${s}`).join("\n")}`
+      : "",
+    (dynamicPb.failure_points ?? []).length
+      ? `FAILURE_POINTS:\n- ${(dynamicPb.failure_points ?? []).join("\n- ")}`
+      : "",
+    rolesLines.trim()
+      ? `INGREDIENT_ROLES:\n${rolesLines}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n") || `DISH_FAMILY: ${dynamicPb.dish_family}\nCook using sound technique for this dish.`;
 
   const dCtx = {
-    subsLines,
-    variantNotes: variant_notes,
-    tipIdeas: [...flowHint.extraTipIdeas, ...tipCandidatesAll].slice(0, 18),
-    failurePoints: dynamicPb.failure_points,
-    sourceFlowNarrative: flowHint.narrative,
+    canonicalStepPlanBlock: canonicalBlock,
+    canonTips: canonicalPlan.tip_candidates,
+    canonWarnings: canonicalPlan.warning_candidates,
+    canonVariants: dedupeStrings(
+      [
+        ...canonicalPlan.variant_candidates,
+        ...canonicalPlan.discarded_or_secondary_flows,
+      ],
+      14
+    ),
   };
 
   const expectedFlow = dynamicPb.expected_flow ?? [];
@@ -1777,15 +1840,13 @@ export async function synthesizeRecipePhased(
     authored = await phaseDAuthoring(
       openai,
       profile,
-      playbookD,
+      playbookBlock,
       dynamicPb.dish_family,
       core,
       optional,
-      rolesLines,
       dCtx,
       style,
       band,
-      expectedFlow,
       dFix
     );
     if (!authored || authored.steps.length === 0) {
@@ -1819,7 +1880,71 @@ export async function synthesizeRecipePhased(
     if (dAtt === 3) authored = { ...authored, steps: stepsTry };
   }
 
-  if (!authored || authored.steps.length === 0) return null;
+  if (!authored || authored.steps.length === 0) {
+    const dn = profile.canonical_dish_name || fallbackTitle;
+    const coreHint =
+      core.length > 0
+        ? ` Key ingredients: ${core.map((c) => c.name).slice(0, 12).join(", ")}.`
+        : "";
+    console.warn(
+      "[synthesis-phased:D] Phase D LLM produced no usable steps — emergency steps from canonical plan (merge/create recovery)"
+    );
+    const st = canonicalPlan.dominant_flow.stages;
+    let emerg: RecipeStep[];
+    if (!st.length) {
+      emerg = [
+        {
+          title: "Prepare",
+          instructions: `Prepare and combine ingredients for ${dn}.${coreHint}`,
+          time: "20 min",
+          tools: [],
+          goal: "",
+          time_minutes: 20,
+        },
+        {
+          title: "Cook",
+          instructions: `Cook ${dn} using the appropriate heat and timing until done.`,
+          time: "30 min",
+          tools: [],
+          goal: "",
+          time_minutes: 30,
+        },
+        {
+          title: "Serve",
+          instructions: "Finish, rest if needed, and serve.",
+          time: "5 min",
+          tools: [],
+          goal: "",
+          time_minutes: 5,
+        },
+      ];
+    } else {
+      emerg = st.slice(0, 10).map((s, i) => {
+        const ins = [s.action_summary, ...s.supporting_lines].join(" ").trim();
+        return {
+          title: (s.stage || `Step ${i + 1}`).slice(0, 60),
+          instructions: (ins || s.stage).slice(0, 500),
+          time: "As needed",
+          tools: [] as string[],
+          goal: "",
+        };
+      });
+    }
+    const injE = injectFamilyMandatorySteps(emerg, dynamicPb.dish_family);
+    emerg = injE.steps;
+    if (emerg.length > 12) emerg = clampSteps(emerg, 12);
+    authored = {
+      summary: `${dn}: follow the steps below (refined from your sources).`,
+      steps: emerg,
+      tips: dedupeStrings(
+        [...canonicalPlan.tip_candidates, ...tipCandidatesAll.slice(0, 6)],
+        8
+      ),
+      servings_base: 4,
+      critical_tips: canonicalPlan.warning_candidates.slice(0, 5),
+      avoid_mistakes: [],
+    };
+  }
 
   let steps = authored.steps;
   let tips = authored.tips;
@@ -1842,8 +1967,14 @@ export async function synthesizeRecipePhased(
 
   const title = profile.canonical_dish_name || fallbackTitle;
   const mergedTips = dedupeStrings(
-    [...critical_tips, ...variant_notes, ...tips].filter(Boolean),
-    10
+    [
+      ...critical_tips,
+      ...variant_notes,
+      ...tips,
+      ...canonicalPlan.tip_candidates,
+      ...canonicalPlan.warning_candidates.map((w) => `Note: ${w}`),
+    ].filter(Boolean),
+    12
   );
 
   const recipe_quality: RecipeQualityMeta = {
@@ -1876,6 +2007,10 @@ export async function synthesizeRecipePhased(
   const payload = finalizeSynthesisPayload(payloadRaw, {
     ingredient_roles: roleRows,
   });
+
+  console.log(
+    `[synthesis-phased:canonical-flow] raw_step_candidates=${canonRes.rawCandidateCount} cluster_count=${canonRes.clusterCount} dominant_flow_stage_count=${canonicalPlan.dominant_flow.stages.length} secondary_flow_count=${canonRes.secondaryFlowItemCount} final_authored_step_count=${payload.steps.length} canon_source=${canonRes.usedLlmPlan ? "llm" : "fallback"} path=phased`
+  );
 
   return { payload, source_extractions: extractions };
 }

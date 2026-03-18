@@ -59,12 +59,20 @@ function normalizeStep(raw: Record<string, unknown>, index: number): RecipeStep 
   return { title, instructions, time, tools, goal };
 }
 
+const CANONICAL_APPEND = `
+
+When CANONICAL_STEP_PLAN is provided:
+- Output exactly ONE linear recipe (6–10 steps, max 12). Follow the plan stage order.
+- No "To marinate / For the sauce" section titles — action titles only.
+- Do NOT merge two full alternate methods; one dominant flow only.`;
+
 /**
  * Final AI pass: turn plain step lines into structured, beginner-friendly steps.
  */
 export async function finalizeStructuredSteps(
   stepLines: string[],
-  openaiApiKey: string
+  openaiApiKey: string,
+  opts?: { canonicalSpine?: string }
 ): Promise<RecipeStep[] | null> {
   const lines = stepLines.map((s) => s.trim()).filter(Boolean);
   if (lines.length === 0) return [];
@@ -77,14 +85,22 @@ export async function finalizeStructuredSteps(
     .join("\n")
     .slice(0, 14000);
 
+  const spine = opts?.canonicalSpine?.trim();
+  const system = spine
+    ? STEP_INSTRUCTOR_SYSTEM + CANONICAL_APPEND
+    : STEP_INSTRUCTOR_SYSTEM;
+  const user = spine
+    ? `CANONICAL_STEP_PLAN (mandatory single flow):\n${spine.slice(0, 24_000)}\n\nReference procedural lines (compress into one timeline):\n${numbered}`
+    : `Rewrite these recipe steps into structured beginner instructions:\n\n${numbered}`;
+
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: STEP_INSTRUCTOR_SYSTEM },
+        { role: "system", content: system },
         {
           role: "user",
-          content: `Rewrite these recipe steps into structured beginner instructions:\n\n${numbered}`,
+          content: user,
         },
       ],
       response_format: { type: "json_object" },
@@ -95,7 +111,8 @@ export async function finalizeStructuredSteps(
       return null;
     }
     const out: RecipeStep[] = [];
-    for (let i = 0; i < parsed.steps.length; i++) {
+    const cap = spine ? 12 : 24;
+    for (let i = 0; i < parsed.steps.length && out.length < cap; i++) {
       const item = parsed.steps[i];
       if (!item || typeof item !== "object") continue;
       const step = normalizeStep(item as Record<string, unknown>, i);

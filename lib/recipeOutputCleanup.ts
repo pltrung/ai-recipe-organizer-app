@@ -13,16 +13,28 @@ import {
   normalizeIngredientName,
   sortIngredientsByRole,
 } from "./ingredientNormalize";
+import { stepActionFingerprint } from "./stepFlowCanonicalization";
 
 function stepText(s: RecipeStep): string {
   const parts = [s.title, s.instructions, ...(s.instructions_bullets ?? [])];
   return parts.join(" ").toLowerCase();
 }
 
+function wordOverlapRatio(a: string, b: string): number {
+  const wa = new Set(a.split(/\W+/).filter((w) => w.length > 3));
+  const wb = b.split(/\W+/).filter((w) => w.length > 3);
+  if (wa.size === 0) return 0;
+  let hit = 0;
+  for (const w of wb) {
+    if (wa.has(w)) hit++;
+  }
+  return hit / Math.max(wa.size, 4);
+}
+
 function stepsAreDuplicate(a: RecipeStep, b: RecipeStep): boolean {
-  const ta = stepText(a).replace(/\s+/g, " ").slice(0, 200);
-  const tb = stepText(b).replace(/\s+/g, " ").slice(0, 200);
-  if (ta.length < 25 || tb.length < 25) return false;
+  const ta = stepText(a).replace(/\s+/g, " ").slice(0, 220);
+  const tb = stepText(b).replace(/\s+/g, " ").slice(0, 220);
+  if (ta.length < 22 || tb.length < 22) return false;
   if (ta === tb) return true;
   let same = 0;
   const wa = new Set(ta.split(/\W+/).filter((w) => w.length > 3));
@@ -30,7 +42,17 @@ function stepsAreDuplicate(a: RecipeStep, b: RecipeStep): boolean {
     if (w.length > 3 && wa.has(w)) same++;
   }
   const denom = Math.min(wa.size, 8);
-  return denom > 0 && same / denom > 0.85;
+  if (denom > 0 && same / denom > 0.85) return true;
+  const fa = stepActionFingerprint(`${a.title} ${a.instructions}`);
+  const fb = stepActionFingerprint(`${b.title} ${b.instructions}`);
+  if (
+    fa === fb &&
+    fa !== "other" &&
+    wordOverlapRatio(ta, tb) >= 0.45
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function dedupeRecipeSteps(steps: RecipeStep[]): RecipeStep[] {
@@ -40,6 +62,73 @@ export function dedupeRecipeSteps(steps: RecipeStep[]): RecipeStep[] {
     out.push(s);
   }
   return out;
+}
+
+const SCAFFOLD_RE =
+  /\b(first off|before you begin|pro tip:?|chef'?s tip:?|note:\s*|as mentioned above|see (our )?blog|in a separate (bowl|pan)|meanwhile,?\s+for the)\b/gi;
+
+export function stripStepScaffolding(steps: RecipeStep[]): RecipeStep[] {
+  return steps.map((s) => ({
+    ...s,
+    title: s.title.replace(/^to\s+/i, "").trim() || s.title,
+    instructions: s.instructions
+      .replace(SCAFFOLD_RE, "")
+      .replace(/\s{2,}/g, " ")
+      .trim(),
+  }));
+}
+
+/** Merge back-to-back fry / marinate / coat / mix beats from stacked sources. */
+export function collapseRepeatedActionSteps(
+  steps: RecipeStep[]
+): RecipeStep[] {
+  const mergeable = new Set(["fry", "marinate", "coat", "mix", "heat_oil"]);
+  const out: RecipeStep[] = [];
+  for (const s of steps) {
+    const body = `${s.title} ${s.instructions}`;
+    const fp = stepActionFingerprint(body);
+    const prev = out[out.length - 1];
+    if (prev && mergeable.has(fp)) {
+      const pp = stepActionFingerprint(`${prev.title} ${prev.instructions}`);
+      if (pp === fp) {
+        prev.instructions = `${prev.instructions.trim()} ${s.instructions.trim()}`.trim();
+        const w = [...(prev.warnings ?? []), ...(s.warnings ?? [])].filter(
+          Boolean
+        );
+        if (w.length) prev.warnings = Array.from(new Set(w)).slice(0, 4);
+        continue;
+      }
+    }
+    out.push({ ...s });
+  }
+  return out;
+}
+
+const MAX_INSTRUCTION_CHARS = 420;
+
+function trimAndDedupeStepWarnings(steps: RecipeStep[]): RecipeStep[] {
+  return steps.map((s) => {
+    let ins = s.instructions.replace(/\s+/g, " ").trim();
+    if (ins.length > MAX_INSTRUCTION_CHARS) {
+      ins = ins.slice(0, MAX_INSTRUCTION_CHARS - 1).trim() + "…";
+    }
+    const w = s.warnings?.length
+      ? Array.from(
+          new Set(s.warnings.map((x) => x.trim()).filter(Boolean))
+        ).slice(0, 3)
+      : undefined;
+    return { ...s, instructions: ins, ...(w?.length ? { warnings: w } : {}) };
+  });
+}
+
+/** Dedupe + collapse repeated fry/marinate + strip blog scaffolding; cap 12. */
+export function polishRecipeSteps(steps: RecipeStep[]): RecipeStep[] {
+  let s = dedupeRecipeSteps([...steps]);
+  s = collapseRepeatedActionSteps(s);
+  s = stripStepScaffolding(s);
+  s = dedupeRecipeSteps(s);
+  s = trimAndDedupeStepWarnings(s);
+  return s.slice(0, 12);
 }
 
 /** Remove optional lines that duplicate core by normalized name */
@@ -114,6 +203,11 @@ export function finalizeSynthesisPayload(
   const subs = filterSubsQuality(payload.substitutionsDetailed || [], core, optional);
 
   let steps = dedupeRecipeSteps([...(payload.steps || [])]);
+  steps = collapseRepeatedActionSteps(steps);
+  steps = stripStepScaffolding(steps);
+  steps = dedupeRecipeSteps(steps);
+  steps = trimAndDedupeStepWarnings(steps);
+  if (steps.length > 12) steps = steps.slice(0, 12);
 
   return {
     ...payload,

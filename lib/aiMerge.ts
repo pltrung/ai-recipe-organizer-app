@@ -3,8 +3,8 @@ import type {
   ExtractedRecipeWithConfidence,
   RecipeStep,
   RecipeSubstitutionEntry,
+  StructuredIngredient,
 } from "./types";
-import type { StructuredIngredient } from "./types";
 import {
   synthesizeRecipeFromVersions,
 } from "./recipeSynthesis";
@@ -16,6 +16,15 @@ import {
   finalizeStructuredSteps,
   fallbackStructuredSteps,
 } from "./structuredSteps";
+import type { SourceConfidence } from "./sourceSynthesisConfidence";
+import {
+  buildConfidenceSummary,
+  canonicalizeStepFlow,
+  fallbackCanonicalFromExpectedFlow,
+  formatCanonicalPlanForPhaseD,
+  type CanonicalizeResult,
+} from "./stepFlowCanonicalization";
+import { polishRecipeSteps } from "./recipeOutputCleanup";
 
 const MAX_CORE_INGREDIENTS = 20;
 const MAX_OPTIONAL_INGREDIENTS = 10;
@@ -231,16 +240,112 @@ function mergeServingsBase(sources: ExtractedRecipeWithConfidence[]): number {
   return Math.round(Math.max(...bases));
 }
 
-/** Final layer: structured beginner-friendly steps before save */
+/** Final layer: canonicalize multi-source flows then structured steps */
 async function applyFinalStructuredSteps(
   stepLines: string[],
-  openaiApiKey: string
+  openaiApiKey: string,
+  mergeCtx?: {
+    ordered: ExtractedRecipeWithConfidence[];
+    coreForCanon: StructuredIngredient[];
+    dishTitle: string;
+  }
 ): Promise<RecipeStep[]> {
   const lines = stepLines.map((s) => s.trim()).filter(Boolean);
   if (lines.length === 0) return [];
-  const ai = await finalizeStructuredSteps(lines, openaiApiKey);
-  if (ai && ai.length > 0) return ai;
-  return fallbackStructuredSteps(lines);
+  let canonicalSpine: string | undefined;
+  let canonMetrics: CanonicalizeResult | null = null;
+  if (mergeCtx?.ordered?.length && openaiApiKey?.trim()) {
+    try {
+      const OpenAI = (await import("openai")).default;
+      const openai = new OpenAI({ apiKey: openaiApiKey });
+      const mapConf = (c: string): SourceConfidence =>
+        c === "high" ? "high" : c === "low" ? "low" : "medium_high";
+      const extractionsFromSources = mergeCtx.ordered.map((s) => ({
+        step_candidates: (s.steps ?? []).map(String).filter(Boolean).slice(0, 35),
+        tip_candidates: [] as string[],
+      }));
+      const totalRaw = extractionsFromSources.reduce(
+        (n, e) => n + e.step_candidates.length,
+        0
+      );
+      const extractions =
+        totalRaw > 0
+          ? extractionsFromSources
+          : [{ step_candidates: lines.slice(0, 40), tip_candidates: [] as string[] }];
+      const chunks =
+        totalRaw > 0
+          ? mergeCtx.ordered.map((s) => ({ confidence: mapConf(s.confidence) }))
+          : [{ confidence: "medium" as SourceConfidence }];
+      const coreCanon =
+        mergeCtx.coreForCanon.length > 0
+          ? mergeCtx.coreForCanon
+          : [
+              {
+                name: mergeCtx.dishTitle.slice(0, 80),
+                quantity: null,
+                unit: "",
+                original: mergeCtx.dishTitle,
+              },
+            ];
+      canonMetrics = await canonicalizeStepFlow(openai, {
+        extractions,
+        chunks,
+        expectedFlow: [
+          "Prepare and combine",
+          "Main cooking",
+          "Finish and serve",
+        ],
+        dishFamily: "other",
+        dishName: mergeCtx.dishTitle,
+        coreIngredients: coreCanon,
+        confidenceSummary: buildConfidenceSummary(chunks),
+      });
+      canonicalSpine = formatCanonicalPlanForPhaseD(canonMetrics.plan);
+      if (!canonicalSpine.trim()) {
+        console.error(
+          "[synthesis-phased:canonical-flow] FATAL: merge_intelligent_fallback empty canonical_step_plan"
+        );
+      }
+    } catch (e) {
+      console.error(
+        "[synthesis-phased:canonical-flow] ERROR: canonicalization failed on merge_intelligent_fallback",
+        e
+      );
+    }
+  } else if (mergeCtx?.ordered?.length) {
+    console.error(
+      "[synthesis-phased:canonical-flow] ERROR: merge path missing API key — canonicalization skipped (invalid)"
+    );
+  }
+  if (mergeCtx?.ordered?.length && !canonicalSpine?.trim()) {
+    console.error(
+      "[synthesis-phased:canonical-flow] FATAL: no canonical_step_plan — injecting minimal emergency spine (never author from raw step_candidates alone)"
+    );
+    const ep = fallbackCanonicalFromExpectedFlow([
+      "Prepare and combine components",
+      "Execute main cooking",
+      "Finish and serve",
+    ]);
+    canonicalSpine = formatCanonicalPlanForPhaseD(ep);
+    canonMetrics = {
+      plan: ep,
+      rawCandidateCount: lines.length,
+      clusterCount: 0,
+      secondaryFlowItemCount: 0,
+      usedLlmPlan: false,
+    };
+  }
+  const ai = await finalizeStructuredSteps(lines, openaiApiKey, {
+    canonicalSpine,
+  });
+  const raw = ai && ai.length > 0 ? ai : fallbackStructuredSteps(lines);
+  const polished = polishRecipeSteps(raw);
+  if (canonMetrics) {
+    console.log(
+      `[synthesis-phased:canonical-flow] raw_step_candidates=${canonMetrics.rawCandidateCount} cluster_count=${canonMetrics.clusterCount} dominant_flow_stage_count=${canonMetrics.plan.dominant_flow.stages.length} secondary_flow_count=${canonMetrics.secondaryFlowItemCount} final_authored_step_count=${polished.length} path=merge_intelligent_fallback`
+    );
+  }
+  return polished;
 }
 
 /**
@@ -310,10 +415,11 @@ export async function mergeRecipesIntelligent(
         chef.steps.length > 0
           ? chef.steps
           : fallbackStepsFromSources(ordered);
-      const steps = await applyFinalStructuredSteps(
-        stepLines,
-        openaiApiKey
-      );
+      const steps = await applyFinalStructuredSteps(stepLines, openaiApiKey, {
+        ordered,
+        coreForCanon: core,
+        dishTitle: chef.title || ordered[0]?.title || "Recipe",
+      });
       return {
         title: chef.title,
         description: ordered
@@ -351,7 +457,12 @@ export async function mergeRecipesIntelligent(
 
   const steps = await applyFinalStructuredSteps(
     fallbackStepLines,
-    openaiApiKey || ""
+    openaiApiKey || "",
+    {
+      ordered,
+      coreForCanon: core,
+      dishTitle: title.trim(),
+    }
   );
 
   return {
