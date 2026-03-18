@@ -9,7 +9,6 @@ import type {
   SynthesisDbPayload,
 } from "./types";
 import {
-  dedupeIngredientList,
   normalizeIngredientName,
   sortIngredientsByRole,
 } from "./ingredientNormalize";
@@ -192,12 +191,11 @@ export function finalizeSynthesisPayload(
   }
 ): SynthesisDbPayload {
   const maxOpt = opts?.maxOptional ?? 14;
-  let core = dedupeIngredientList(payload.ingredients.core || []);
-  let optional = dedupeIngredientList(payload.ingredients.optional || []);
+  let core = [...(payload.ingredients.core || [])];
+  let optional = [...(payload.ingredients.optional || [])];
   if (opts?.ingredient_roles?.length) {
     optional = sortIngredientsByRole(optional, opts.ingredient_roles);
   }
-  optional = stripOptionalDuplicatesOfCore(core, optional);
   optional = trimOptionalList(optional, maxOpt);
 
   const subs = filterSubsQuality(payload.substitutionsDetailed || [], core, optional);

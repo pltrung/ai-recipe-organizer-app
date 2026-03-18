@@ -7,9 +7,9 @@ import type { StructuredIngredient } from "./types";
 import { coerceStructuredIngredient } from "./ingredientParser";
 import { normalizeIngredientName, normalizeUnit } from "./ingredientNormalize";
 import {
-  anchorLineSatisfiedInCore,
   type MaterializedAnchor,
 } from "./dishAnchors";
+import type { CanonicalIngredientEntity } from "./ingredientCanonicalization";
 
 export type IngredientSignal = {
   name: string;
@@ -45,26 +45,6 @@ function roleScore(role: string): number {
   return 40;
 }
 
-function stemForCluster(line: string): string {
-  const t = line.trim();
-  if (!t) return "";
-  const stripped = t.replace(
-    /^[\d./\s-]+(?:\d+\/\d+)?\s*(?:tbsp|tsp|tablespoons?|teaspoons?|cups?|oz|lb|lbs|g|kg|ml|l|cloves?|pieces?|large|medium|small)?\.?\s*/i,
-    ""
-  );
-  const blob = (stripped || t).slice(0, 120);
-  return normalizeIngredientName(blob) || cleaningKey(blob);
-}
-
-function cleaningKey(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^\w\s\u00C0-\u024F]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80);
-}
-
 function anchorTokenMatch(nameNorm: string, tokens: string[]): boolean {
   const n = nameNorm.toLowerCase();
   for (const a of tokens) {
@@ -77,15 +57,22 @@ function anchorTokenMatch(nameNorm: string, tokens: string[]): boolean {
   return false;
 }
 
-function clusterMatchesMaterialized(
-  lines: string[],
+/** Anchor match uses canonical ingredient name only (not raw variant lines). */
+function materializedMatchesCanonicalName(
+  canonicalName: string,
   materialized: MaterializedAnchor[]
 ): boolean {
-  for (const { line: anchorLine } of materialized) {
-    for (const ln of lines) {
-      const ing = coerceStructuredIngredient(ln);
-      if (anchorLineSatisfiedInCore([ing], anchorLine)) return true;
-    }
+  const cn = normalizeIngredientName(canonicalName).toLowerCase();
+  if (!cn || cn.length < 2) return false;
+  for (const m of materialized) {
+    const ing = coerceStructuredIngredient(m.line);
+    const an = normalizeIngredientName(
+      ing.name || ing.original || m.line
+    ).toLowerCase();
+    if (!an) continue;
+    if (cn === an || cn.includes(an) || an.includes(cn)) return true;
+    const aw = an.split(/\s+/).filter((w) => w.length > 2);
+    if (aw.some((w) => cn.includes(w))) return true;
   }
   return false;
 }
@@ -99,69 +86,46 @@ function lookupRole(line: string, roleByLine: Map<string, string>): string {
   return "flavor";
 }
 
-export function buildIngredientSignals(
-  numbered: {
-    line: string;
-    sourceIndex: number;
-    sourceConf: SourceConfidence;
-  }[],
+/**
+ * Score pre-canonicalized entities only. Anchors match **canonical_name** (not raw lines).
+ */
+export function buildIngredientSignalsFromCanonical(
+  entities: CanonicalIngredientEntity[],
   roleByLine: Map<string, string>,
   dishAnchorTokens: string[],
   materialized: MaterializedAnchor[],
   coreScoreMin = 70
 ): IngredientSignal[] {
-  type Acc = {
-    key: string;
-    displayName: string;
-    sourceConf: Map<number, SourceConfidence>;
-    lines: string[];
-  };
-  const map = new Map<string, Acc>();
-
-  for (const row of numbered) {
-    const stem = stemForCluster(row.line);
-    const key = stem || cleaningKey(row.line);
-    if (!key) continue;
-    let acc = map.get(key);
-    if (!acc) {
-      acc = {
-        key,
-        displayName: stem || key,
-        sourceConf: new Map(),
-        lines: [],
-      };
-      map.set(key, acc);
-    }
-    const prev = acc.sourceConf.get(row.sourceIndex);
-    const prevW = prev ? CONF_TO_SCORE[prev] ?? 50 : 0;
-    const w = CONF_TO_SCORE[row.sourceConf] ?? 50;
-    if (!prev || w > prevW) acc.sourceConf.set(row.sourceIndex, row.sourceConf);
-    if (acc.lines.length < 6 && row.line.trim()) acc.lines.push(row.line.trim());
-  }
-
   const anchorTokens = [
     ...dishAnchorTokens,
     ...materialized.map((m) => m.line),
   ].filter(Boolean);
 
   const signals: IngredientSignal[] = [];
-  for (const acc of Array.from(map.values())) {
-    const sources = Array.from(acc.sourceConf.keys());
-    const confLevels = sources.map((si) => acc.sourceConf.get(si)!);
+  for (const ent of entities) {
+    const cn = ent.canonical_name.trim();
+    if (!cn) continue;
+
+    const sourceConf = new Map<number, SourceConfidence>();
+    for (const v of ent.variants) {
+      const w = CONF_TO_SCORE[v.sourceConf] ?? 50;
+      const prev = sourceConf.get(v.sourceIndex);
+      const pw = prev ? CONF_TO_SCORE[prev] ?? 0 : 0;
+      if (!prev || w > pw) sourceConf.set(v.sourceIndex, v.sourceConf);
+    }
+    const sources = Array.from(sourceConf.keys());
+    const confLevels = sources.map((si) => sourceConf.get(si)!);
     const frequency = sources.length;
     const frequency_score = Math.min(100, frequency * 30);
     let confidence_score = 0;
     for (const c of confLevels) {
-      confidence_score = Math.max(
-        confidence_score,
-        CONF_TO_SCORE[c] ?? 50
-      );
+      confidence_score = Math.max(confidence_score, CONF_TO_SCORE[c] ?? 50);
     }
 
     let bestRoleScore = 0;
-    let bestRole = "flavor";
-    for (const ln of acc.lines) {
-      const r = lookupRole(ln, roleByLine);
+    let bestRole = ent.ingredient_type === "protein" ? "protein" : "flavor";
+    for (const v of ent.variants) {
+      const r = lookupRole(v.line, roleByLine);
       const rs = roleScore(r);
       if (rs > bestRoleScore) {
         bestRoleScore = rs;
@@ -169,9 +133,10 @@ export function buildIngredientSignals(
       }
     }
 
+    const nameNorm = normalizeIngredientName(cn).toLowerCase();
     const anchor_match =
-      clusterMatchesMaterialized(acc.lines, materialized) ||
-      anchorTokenMatch(acc.displayName, anchorTokens);
+      anchorTokenMatch(nameNorm, anchorTokens) ||
+      materializedMatchesCanonicalName(cn, materialized);
 
     const anchor_score = anchor_match ? 100 : 0;
     let total_score =
@@ -187,21 +152,18 @@ export function buildIngredientSignals(
     else if (total_score >= 30) bucket = "optional";
     else bucket = "ignore";
 
-    let pickLine = acc.lines[0] || acc.displayName;
+    let pickLine = ent.variants[0]!.line;
     let bestConf = -1;
-    for (const ln of acc.lines) {
-      const rows = numbered.filter((n) => n.line === ln);
-      const sc = rows.length
-        ? Math.max(...rows.map((r) => CONF_TO_SCORE[r.sourceConf] ?? 0))
-        : 0;
+    for (const v of ent.variants) {
+      const sc = CONF_TO_SCORE[v.sourceConf] ?? 0;
       if (sc > bestConf) {
         bestConf = sc;
-        pickLine = ln;
+        pickLine = v.line;
       }
     }
 
     signals.push({
-      name: acc.displayName,
+      name: normalizeIngredientName(cn) || cn,
       frequency,
       confidence_levels: confLevels,
       role: bestRole,
@@ -247,9 +209,11 @@ export function signalsToStructuredGroups(signals: IngredientSignal[]): {
     if (s.bucket === "ignore") continue;
     const ing = coerceStructuredIngredient(s.best_line);
     if (!ing.name && !ing.original) continue;
-    const k = normalizeIngredientName(ing.name || ing.original || "").toLowerCase();
+    const canonicalName =
+      normalizeIngredientName(s.name) || normalizeIngredientName(ing.name || ing.original || "") || s.name;
+    const k = canonicalName.toLowerCase();
     if (!k || k.length < 2) continue;
-    ing.name = normalizeIngredientName(ing.name || ing.original || s.name);
+    ing.name = canonicalName;
     ing.unit = normalizeUnit(ing.unit || "") || ing.unit;
     ing.original = (ing.original || s.best_line).replace(
       /\s*(see blog|see recipe|note\s*\d+)\s*$/i,

@@ -16,9 +16,9 @@ import {
   formatConsensusForPhaseC,
 } from "./ingredientConsensus";
 import {
-  normalizeAndDedupeGroups,
   normalizeIngredientName,
 } from "./ingredientNormalize";
+import { canonicalizeIngredients } from "./ingredientCanonicalization";
 import { finalizeSynthesisPayload } from "./recipeOutputCleanup";
 import {
   anchorLineSatisfiedInCore,
@@ -31,7 +31,7 @@ import {
   validateAnchorCoreCoverage,
 } from "./dishAnchors";
 import {
-  buildIngredientSignals,
+  buildIngredientSignalsFromCanonical,
   rebucketSignals,
   signalsToSnapshots,
   signalsToStructuredGroups,
@@ -378,6 +378,46 @@ function duplicateNormalizedInCore(core: StructuredIngredient[]): boolean {
     seen.add(k);
   }
   return false;
+}
+
+/** One row per canonical name (Phase C LLM fallback may repeat lines). */
+function uniqueCoreByCanonicalName(core: StructuredIngredient[]): StructuredIngredient[] {
+  const seen = new Set<string>();
+  const out: StructuredIngredient[] = [];
+  for (const c of core) {
+    const k = normalizeIngredientName(c.name).toLowerCase();
+    if (!k) continue;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const nm = normalizeIngredientName(c.name) || c.name;
+    out.push({ ...c, name: nm });
+  }
+  return out;
+}
+
+function stripOptionalOverlappingCore(
+  core: StructuredIngredient[],
+  optional: StructuredIngredient[]
+): StructuredIngredient[] {
+  const ckeys = new Set(
+    core.map((c) => normalizeIngredientName(c.name).toLowerCase()).filter(Boolean)
+  );
+  return optional.filter((o) => {
+    const k = normalizeIngredientName(o.name).toLowerCase();
+    return k && !ckeys.has(k);
+  });
+}
+
+function postCanonicalIngredientCleanup(
+  core: StructuredIngredient[],
+  optional: StructuredIngredient[]
+): { core: StructuredIngredient[]; optional: StructuredIngredient[] } {
+  const cr = uniqueCoreByCanonicalName(core.map(cleanupIngredientArtifacts));
+  const op = stripOptionalOverlappingCore(
+    cr,
+    optional.map(cleanupIngredientArtifacts)
+  );
+  return { core: cr, optional: op };
 }
 
 function optionalHasEssentialOverlap(
@@ -848,20 +888,8 @@ Max 12 core, 10 optional. variant_notes max 3.`;
         .slice(0, 40)
     : [];
 
-  const merged = normalizeAndDedupeGroups({ core, optional });
-  core = merged.core;
-  optional = merged.optional;
-
-  const seen = new Set<string>();
-  const dedupeOpt: StructuredIngredient[] = [];
-  for (const o of optional) {
-    const k = normalizeIngredientName(o.name);
-    if (seen.has(k) || core.some((c) => normalizeIngredientName(c.name) === k))
-      continue;
-    seen.add(k);
-    dedupeOpt.push(o);
-  }
-  optional = dedupeOpt;
+  core = uniqueCoreByCanonicalName(core);
+  optional = stripOptionalOverlappingCore(core, optional);
   subs = filterSubstitutionsQuality(subs, core, optional);
 
   core = core.map(cleanupIngredientArtifacts);
@@ -1526,6 +1554,14 @@ export async function synthesizeRecipePhased(
     `[synthesis-phased:consensus] clusters=${consensusRows.length} top=${consensusRows.slice(0, 5).map((r) => r.name).join(",")}`
   );
 
+  const ingredientEntities = canonicalizeIngredients(
+    numbered.map(({ line, sourceIndex, sourceConf }) => ({
+      line,
+      sourceIndex,
+      sourceConf,
+    }))
+  );
+
   const roleRes = await phasePreCIngredientRoleMap(
     openai,
     allIng,
@@ -1627,8 +1663,8 @@ export async function synthesizeRecipePhased(
     let sigs =
       cAttempt > 0
         ? rebucketSignals(workingSignals, coreScoreMin)
-        : buildIngredientSignals(
-            numbered,
+        : buildIngredientSignalsFromCanonical(
+            ingredientEntities,
             roleRes.roleByLine,
             anchorTokensForScore,
             materializedAnchors,
@@ -1639,16 +1675,9 @@ export async function synthesizeRecipePhased(
     const enf = enforceAnchorsInCore(cr, op, materializedAnchors);
     cr = enf.core;
     op = enf.optional;
-    const mg = normalizeAndDedupeGroups({ core: cr, optional: op });
-    cr = mg.core.map(cleanupIngredientArtifacts);
-    op = mg.optional.map(cleanupIngredientArtifacts);
-    const ckeys = new Set(
-      cr.map((c) => normalizeIngredientName(c.name).toLowerCase())
-    );
-    op = op.filter((x) => {
-      const k = normalizeIngredientName(x.name).toLowerCase();
-      return !k || !ckeys.has(k);
-    });
+    const mg = postCanonicalIngredientCleanup(cr, op);
+    cr = mg.core;
+    op = mg.optional;
 
     if (cr.length === 0) {
       coreScoreMin = Math.max(30, coreScoreMin - 10);
@@ -1739,19 +1768,9 @@ export async function synthesizeRecipePhased(
   const enforced = enforceAnchorsInCore(core, optional, materializedAnchors);
   core = enforced.core;
   optional = enforced.optional;
-  const mergedGroups = normalizeAndDedupeGroups({ core, optional });
+  const mergedGroups = postCanonicalIngredientCleanup(core, optional);
   core = mergedGroups.core;
   optional = mergedGroups.optional;
-  const optDedup: StructuredIngredient[] = [];
-  const ckeys = new Set(
-    core.map((c) => normalizeIngredientName(c.name).toLowerCase())
-  );
-  for (const o of optional) {
-    const k = normalizeIngredientName(o.name).toLowerCase();
-    if (k && ckeys.has(k)) continue;
-    optDedup.push(o);
-  }
-  optional = optDedup;
   phaseC = { ...phaseC, core, optional };
 
   const missEss = strictEssentialsMissing(core, profile.essential_ingredients);
