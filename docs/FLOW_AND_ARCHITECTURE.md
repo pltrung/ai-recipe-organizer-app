@@ -22,7 +22,7 @@ Each recipe keeps a **parallel history**:
 
 **Combined corpus:** `raw_texts.join("\n\n---\n\n")` (constant `RAW_TEXT_JOINER` in `recipeSourceHistory.ts`).
 
-**Primary synthesis:** **`synthesizeRecipeFromCombinedRaw(combinedText, …)`** (`recipeSynthesis.ts`) — one JSON recipe from the **entire** corpus (ingredients core/optional, substitutions, structured steps, tips, mistakes, techniques). **Not** incremental merge of “old row + last page only.”
+**Primary synthesis:** **`synthesizeRecipeFromCombinedRaw`** (`recipeSynthesis.ts`) — **stage 1** extracts candidate ingredient/step/tip lines from the full corpus; **stage 2** chef **decides** the single best recipe (not a summary of everything). **Not** incremental merge of “old row + last page only.”
 
 **Legacy rows** without `raw_texts`: **`hydrateRecipeSourceHistory`** treats legacy **`raw_text`** as a single chunk and aligns `sources` from **`source_urls`** where possible.
 
@@ -45,7 +45,7 @@ Each recipe keeps a **parallel history**:
 1. **`previousRecipe = recipeFromDbRow(row)`** (before update).
 2. **`nextRecipe`** from new synthesis payload.
 3. **`diffRecipes(prev, next)`** (`recipeDiff.ts`) — ingredients (normalized keys), core↔optional moves, steps (token Jaccard), tips/mistakes/techniques.
-4. **`summarizeRecipeDiffWithAi`** (`recipeDiffAi.ts`) + heuristic fallback → **`last_diff`** saved on row; **`versions[]`** prepends a compact entry (max **10**).
+4. **`summarizeRecipeDiffWithAi`** (`recipeDiffAi.ts`) — **`summary`** + **`key_improvements[]`** themed on **authenticity, technique, flavor** (not raw ingredient/step lists) + heuristic fallback → **`last_diff`**; **`versions[]`** prepends compact entries (max **10**).
 5. Extension: **“Recipe updated”** modal. Web: **`RecipeUpdatedModal`** when opening **`/recipe/[id]?updated=…`**. Recipe page: collapsible **Source update history**.
 
 ---
@@ -88,7 +88,7 @@ Each recipe keeps a **parallel history**:
 - Core / optional ingredients, substitutions, structured steps, tips, mistakes, techniques, scaling.
 - **`needs_user_input`:** draft CTA.
 - **`needs_review`:** banner when a new source was stored but re-synthesis failed.
-- **`last_diff`:** modal when URL has **`?updated=`** (e.g. from extension “View recipe”).
+- **`last_diff`:** **`summary`** + **what improved** bullets (`key_improvements`); modal when URL has **`?updated=`**.
 - **`versions[]`:** **Source update history** (summaries per merge).
 
 ### 3.4 Chrome extension
@@ -99,7 +99,7 @@ Each recipe keeps a **parallel history**:
 
 | After merge success | UI |
 |---------------------|-----|
-| **`last_diff` present | **Recipe updated** screen (summary, insights, ingredient/step bullets) → **Continue** → success view |
+| **`last_diff` present | **Recipe updated** (summary + key improvements: authenticity / technique / flavor) → **Continue** → success view |
 | Always | **View recipe** opens **`/recipe/{id}?updated={timestamp}`** (cache-bust) |
 
 **Capture:** visible text from article-like nodes; cap ~5000 chars; **`raw_text`**, **`source_url`**, **`platform`**.
@@ -126,9 +126,15 @@ Same as before: **`ExtractedRecipe`** with **`StructuredIngredient`**; JSON-LD b
 
 ### 6.1 `synthesizeRecipeFromCombinedRaw` (primary for full history)
 
-- **Input:** single string = all **`raw_texts`** joined by **`\n\n---\n\n`**.
-- **Output:** same JSON shape as version synthesis (core/optional/substitutions/steps/tips/mistakes/techniques/servings).
-- **Quality gate:** retry if output empty but input is substantial.
+**Input:** all **`raw_texts`** joined by **`\n\n---\n\n`**.
+
+**Two-stage (decision-based, not summarization):**
+
+1. **Stage 1 — extract candidates** — JSON: **`ingredient_candidates[]`**, **`step_candidates[]`**, **`tip_candidates[]`** (exhaustive capture from raw; no merging). If lists stay empty, stage 1 retries once; chef stage can still see a raw excerpt.
+2. **Stage 2 — chef decision** — One authoritative recipe: core vs optional vs substitutions by **culinary judgment** (explicitly **not** frequency-based); steps rewritten from scratch using **only** finalized ingredients; tips / mistakes / techniques.
+3. **Validation** — Fails if: many step tokens are not covered by any ingredient line; too many **core** items never mentioned in steps; empty core when stage 1 listed many ingredients. **One retry** of stage 2 with validation feedback. If still failing, **best-effort** result is returned (logged).
+
+**Output:** same JSON shape as version synthesis. Empty-output quality retry remains before validation.
 
 ### 6.2 `synthesizeRecipeFromVersions` + `mergeRecipesIntelligent`
 
@@ -193,7 +199,7 @@ Maps synthesis output → DB columns.
 | **`sources`**, **`raw_texts`** | **Parallel capture history** (jsonb arrays) |
 | **`needs_user_input`** | Draft / weak capture |
 | **`needs_review`** | New source saved; synthesis failed |
-| **`last_diff`** | Latest merge diff (structured + AI summary + bullet arrays) |
+| **`last_diff`** | Structured diff + **`summary`** + **`key_improvements[]`** (AI: authenticity, technique, flavor) |
 | **`versions`** | Rolling history of merge summaries (max 10) |
 | **`created_at`**, **`updated_at`** | Timestamps |
 

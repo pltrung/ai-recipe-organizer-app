@@ -5,9 +5,17 @@ import type { RecipeLastDiff } from "@/lib/types";
 
 type Props = {
   lastDiff: RecipeLastDiff | null | undefined;
-  /** Open when user lands from extension (?updated=) */
   openWhenPresent: boolean;
 };
+
+function improvementsList(d: RecipeLastDiff): string[] {
+  if (d.key_improvements?.length) return d.key_improvements;
+  return [
+    ...(d.new_insights ?? []),
+    ...(d.ingredient_changes ?? []).map((x) => `Ingredients: ${x}`),
+    ...(d.step_changes ?? []).map((x) => `Steps: ${x}`),
+  ];
+}
 
 export function RecipeUpdatedModal({ lastDiff, openWhenPresent }: Props) {
   const [open, setOpen] = useState(false);
@@ -18,12 +26,11 @@ export function RecipeUpdatedModal({ lastDiff, openWhenPresent }: Props) {
     }
   }, [openWhenPresent, lastDiff?.at]);
 
+  const bullets = lastDiff ? improvementsList(lastDiff) : [];
   const hasContent =
     lastDiff &&
     (lastDiff.summary ||
-      (lastDiff.ingredient_changes?.length ?? 0) > 0 ||
-      (lastDiff.step_changes?.length ?? 0) > 0 ||
-      (lastDiff.new_insights?.length ?? 0) > 0);
+      bullets.length > 0);
   if (!hasContent) return null;
 
   return (
@@ -41,51 +48,28 @@ export function RecipeUpdatedModal({ lastDiff, openWhenPresent }: Props) {
             >
               Recipe updated
             </h2>
-            <p className="mt-2 text-sm text-neutral-600">{lastDiff.summary}</p>
+            <p className="mt-2 text-sm text-neutral-600">{lastDiff!.summary}</p>
             <p className="mt-1 text-xs text-neutral-400">
-              {lastDiff.source_count_after} source
-              {lastDiff.source_count_after === 1 ? "" : "s"} ·{" "}
-              {lastDiff.at
-                ? new Date(lastDiff.at).toLocaleString(undefined, {
+              {lastDiff!.source_count_after} source
+              {lastDiff!.source_count_after === 1 ? "" : "s"} ·{" "}
+              {lastDiff!.at
+                ? new Date(lastDiff!.at).toLocaleString(undefined, {
                     dateStyle: "medium",
                     timeStyle: "short",
                   })
                 : ""}
             </p>
 
-            {lastDiff.new_insights.length > 0 && (
+            {bullets.length > 0 && (
               <section className="mt-5">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-emerald-800">
-                  New insights
+                  What improved
                 </h3>
-                <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-neutral-700">
-                  {lastDiff.new_insights.map((x, i) => (
-                    <li key={i}>{x}</li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            {lastDiff.ingredient_changes.length > 0 && (
-              <section className="mt-4">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-900">
-                  Ingredient changes
-                </h3>
-                <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-neutral-700">
-                  {lastDiff.ingredient_changes.map((x, i) => (
-                    <li key={i}>{x}</li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            {lastDiff.step_changes.length > 0 && (
-              <section className="mt-4">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-blue-900">
-                  Step improvements
-                </h3>
-                <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-neutral-700">
-                  {lastDiff.step_changes.map((x, i) => (
+                <p className="mt-1 text-xs text-neutral-500">
+                  Authenticity · technique · flavor
+                </p>
+                <ul className="mt-3 list-inside list-disc space-y-2 text-sm text-neutral-700">
+                  {bullets.map((x, i) => (
                     <li key={i}>{x}</li>
                   ))}
                 </ul>

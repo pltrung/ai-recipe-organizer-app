@@ -143,9 +143,12 @@ export type RecipeLastDiff = {
   at: string;
   source_count_after: number;
   summary: string;
-  ingredient_changes: string[];
-  step_changes: string[];
-  new_insights: string[];
+  /** Authenticity, technique, flavor — primary UX */
+  key_improvements: string[];
+  /** Legacy rows only */
+  ingredient_changes?: string[];
+  step_changes?: string[];
+  new_insights?: string[];
   structured?: RecipeDiffStructured;
 };
 
@@ -153,9 +156,10 @@ export type RecipeDiffVersionEntry = {
   at: string;
   source_count_after: number;
   summary: string;
-  ingredient_changes: string[];
-  step_changes: string[];
-  new_insights: string[];
+  key_improvements: string[];
+  ingredient_changes?: string[];
+  step_changes?: string[];
+  new_insights?: string[];
 };
 
 export interface RecipeRow {

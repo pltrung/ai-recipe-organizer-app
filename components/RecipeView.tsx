@@ -192,6 +192,13 @@ export function RecipeView({
                     </span>
                   ) : null}
                   <p className="mt-0.5 text-neutral-600">{v.summary}</p>
+                  {v.key_improvements?.length ? (
+                    <ul className="mt-1 list-inside list-disc text-neutral-500">
+                      {v.key_improvements.slice(0, 3).map((x, j) => (
+                        <li key={j}>{x}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </li>
               ))}
             </ul>

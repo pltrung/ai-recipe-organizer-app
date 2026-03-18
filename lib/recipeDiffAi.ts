@@ -4,21 +4,30 @@ import { recipeToDiffSummaryText } from "./recipeDiff";
 
 export type AiDiffResult = {
   summary: string;
-  ingredient_changes: string[];
-  step_changes: string[];
-  new_insights: string[];
+  key_improvements: string[];
 };
 
-const SYSTEM = `You compare two versions of the same recipe (before vs after adding a new source).
-Be specific and helpful. Focus on what improved for the cook.
-Return STRICT JSON only:
+const SYSTEM = `You compare two versions of the same recipe: BEFORE (older) and AFTER (updated with a new source).
+
+Explain what IMPROVED in the updated recipe. Be concrete and useful for a home cook.
+
+Focus on:
+* Authenticity — truer to the dish, traditional ingredients or methods restored, corrections to the recipe identity
+* Technique — clearer steps, better timing, tools, order of operations, pro methods
+* Flavor — balance, depth, seasoning, optional enhancements that genuinely help
+
+Do not list raw diffs or inventory changes unless they matter for one of the three areas above.
+
+Return STRICT JSON only, no markdown:
 {
   "summary": string,
-  "ingredient_changes": string[],
-  "step_changes": string[],
-  "new_insights": string[]
+  "key_improvements": string[]
 }
-Max 5 items per array. summary max 400 characters.`;
+
+Rules:
+- summary: 2–4 sentences, engaging (max ~500 characters).
+- key_improvements: 4–8 distinct bullets, each one complete sentence or phrase (no duplicates).
+- If changes are minor, say so honestly with 2–3 shorter bullets.`;
 
 export async function summarizeRecipeDiffWithAi(
   prev: Recipe,
@@ -29,18 +38,17 @@ export async function summarizeRecipeDiffWithAi(
   if (!openaiApiKey?.trim()) return null;
 
   const hint = [
-    "Structured hints:",
-    `added core: ${structured.added_core.slice(0, 8).join("; ") || "(none)"}`,
-    `removed core: ${structured.removed_core.slice(0, 6).join("; ") || "(none)"}`,
-    `moved optional→core: ${structured.moved_optional_to_core.slice(0, 4).join("; ") || "(none)"}`,
-    `new steps: ${structured.steps_new.length}, removed: ${structured.steps_removed.length}, modified: ${structured.steps_modified.length}`,
-    `new tips: ${structured.new_tips.length}, new techniques: ${structured.new_techniques.length}`,
+    "Change signals (for context only; interpret in light of authenticity, technique, flavor):",
+    `core added/removed: +${structured.added_core.length} / −${structured.removed_core.length}`,
+    `optional→core promotions: ${structured.moved_optional_to_core.length}`,
+    `steps: +${structured.steps_new.length} new, ~${structured.steps_modified.length} refined, −${structured.steps_removed.length} removed`,
+    `new tips/techniques: ${structured.new_tips.length} / ${structured.new_techniques.length}`,
   ].join("\n");
 
   const prevT = recipeToDiffSummaryText(prev, 500).slice(0, 12000);
   const nextT = recipeToDiffSummaryText(next, 500).slice(0, 12000);
 
-  const user = `PREVIOUS RECIPE:\n${prevT}\n\n---\n\nNEW RECIPE:\n${nextT}\n\n---\n${hint}\n\nSummarize what improved.`;
+  const user = `BEFORE (previous recipe):\n${prevT}\n\n---\n\nAFTER (updated recipe):\n${nextT}\n\n---\n${hint}`;
 
   try {
     const OpenAI = (await import("openai")).default;
@@ -56,20 +64,20 @@ export async function summarizeRecipeDiffWithAi(
     const raw = completion.choices[0]?.message?.content ?? "";
     const p = JSON.parse(raw) as Record<string, unknown>;
     const summary = String(p.summary ?? "").trim().slice(0, 600);
-    const ingredient_changes = Array.isArray(p.ingredient_changes)
-      ? p.ingredient_changes.map((x) => String(x).trim()).filter(Boolean).slice(0, 8)
+    let key_improvements = Array.isArray(p.key_improvements)
+      ? p.key_improvements.map((x) => String(x).trim()).filter(Boolean).slice(0, 10)
       : [];
-    const step_changes = Array.isArray(p.step_changes)
-      ? p.step_changes.map((x) => String(x).trim()).filter(Boolean).slice(0, 8)
-      : [];
-    const new_insights = Array.isArray(p.new_insights)
-      ? p.new_insights.map((x) => String(x).trim()).filter(Boolean).slice(0, 8)
-      : [];
+    if (!key_improvements.length && Array.isArray(p.ingredient_changes)) {
+      key_improvements = (p.ingredient_changes as unknown[])
+        .map((x) => String(x).trim())
+        .filter(Boolean)
+        .slice(0, 8);
+    }
     return {
-      summary: summary || "Recipe updated from your new source.",
-      ingredient_changes,
-      step_changes,
-      new_insights,
+      summary:
+        summary ||
+        "The recipe was refined using your new source—see key improvements below.",
+      key_improvements,
     };
   } catch (e) {
     console.error("[recipeDiffAi]", e);
@@ -77,43 +85,60 @@ export async function summarizeRecipeDiffWithAi(
   }
 }
 
-/** Fallback when AI unavailable: derive bullets from structured diff. */
+/** Fallback when AI unavailable — still themed on authenticity, technique, flavor. */
 export function heuristicDiffSummary(
   structured: RecipeDiffStructured
 ): AiDiffResult {
-  const ingredient_changes: string[] = [];
-  for (const x of structured.added_core.slice(0, 4)) {
-    ingredient_changes.push(`Added to core: ${x}`);
+  const key_improvements: string[] = [];
+
+  if (structured.moved_optional_to_core.length) {
+    key_improvements.push(
+      `Authenticity: Elevated essential ingredients to core (e.g. ${structured.moved_optional_to_core.slice(0, 2).join("; ")}) so the dish reads truer to tradition.`
+    );
   }
-  for (const x of structured.removed_core.slice(0, 3)) {
-    ingredient_changes.push(`Removed from core: ${x}`);
+  if (structured.added_core.length) {
+    key_improvements.push(
+      `Authenticity / flavor: Core list now includes ${structured.added_core.slice(0, 3).join(", ")}—likely filling gaps from the new source.`
+    );
   }
-  for (const x of structured.moved_optional_to_core.slice(0, 3)) {
-    ingredient_changes.push(`Promoted to core: ${x}`);
+  if (structured.removed_core.length) {
+    key_improvements.push(
+      `Authenticity: Trimmed or demoted items that didn’t belong in core (${structured.removed_core.slice(0, 2).join(", ")}).`
+    );
   }
-  const step_changes: string[] = [];
-  if (structured.steps_new.length) {
-    step_changes.push(`${structured.steps_new.length} new step(s) added`);
+  if (structured.steps_modified.length >= 2 || structured.steps_new.length >= 2) {
+    key_improvements.push(
+      `Technique: Steps were rewritten or expanded (${structured.steps_modified.length} refined, ${structured.steps_new.length} new)—clearer order, timing, or methods.`
+    );
+  } else if (structured.steps_modified.length || structured.steps_new.length) {
+    key_improvements.push(
+      `Technique: Cooking steps were tightened or clarified for easier execution.`
+    );
   }
-  if (structured.steps_modified.length) {
-    step_changes.push(`${structured.steps_modified.length} step(s) refined`);
+  for (const t of structured.new_techniques.slice(0, 2)) {
+    key_improvements.push(`Technique: Highlights “${t.slice(0, 80)}${t.length > 80 ? "…" : ""}”.`);
   }
-  if (structured.steps_removed.length) {
-    step_changes.push(`${structured.steps_removed.length} step(s) removed or merged`);
+  for (const t of structured.new_tips.slice(0, 2)) {
+    key_improvements.push(
+      `Flavor / technique: ${t.slice(0, 100)}${t.length > 100 ? "…" : ""}`
+    );
   }
-  const new_insights: string[] = [];
-  for (const t of structured.new_tips.slice(0, 4)) {
-    new_insights.push(`Tip: ${t.slice(0, 120)}${t.length > 120 ? "…" : ""}`);
+  if (structured.added_optional.length) {
+    key_improvements.push(
+      `Flavor: Optional add-ons (${structured.added_optional.slice(0, 2).join(", ")}) for depth or variation.`
+    );
   }
-  for (const t of structured.new_techniques.slice(0, 3)) {
-    new_insights.push(`Technique: ${t}`);
-  }
-  for (const t of structured.new_mistakes.slice(0, 2)) {
-    new_insights.push(`Watch out: ${t.slice(0, 100)}`);
-  }
+
   const summary =
-    ingredient_changes.length || step_changes.length || new_insights.length
-      ? "Your recipe was refined using the new source."
-      : "Minor polish across ingredients or steps.";
-  return { summary, ingredient_changes, step_changes, new_insights };
+    key_improvements.length > 0
+      ? "Your new source helped sharpen authenticity, technique, and/or flavor—see the points below."
+      : "Small polish across the recipe; the update keeps the dish aligned with your sources.";
+
+  if (!key_improvements.length) {
+    key_improvements.push(
+      "The merged recipe reflects the combined sources; open the full recipe to compare details."
+    );
+  }
+
+  return { summary, key_improvements: key_improvements.slice(0, 8) };
 }

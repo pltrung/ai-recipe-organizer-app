@@ -338,23 +338,47 @@ export async function synthesizeRecipeFromVersions(
   }
 }
 
-const SYNTHESIS_FROM_RAW_SYSTEM = `You are a professional chef.
+/** Stage 1: exhaustive candidate lists from raw corpus (no final decisions). */
+const STAGE1_EXTRACT_SYSTEM = `You extract recipe material from raw text. Multiple sources may be separated by ---.
 
-You are given the FULL raw text captured from one or more recipe webpages or sources. Blocks are separated by ---.
+Return STRICT JSON only:
+{
+  "ingredient_candidates": string[],
+  "step_candidates": string[],
+  "tip_candidates": string[]
+}
 
-Your job is to read EVERYTHING and produce ONE authoritative, cookable recipe.
+Rules:
+- ingredient_candidates: EVERY distinct ingredient mention (full lines as written, all variants and duplicates OK). Include garnishes, sauces, spices.
+- step_candidates: EVERY procedural line or fragment (numbered or not), even messy or redundant.
+- tip_candidates: tips, warnings, techniques, timing notes, "chef says", common mistakes — one string per item.
+- Do NOT merge or judge quality; capture comprehensively.
+- Cap each array at 120 items if needed (prioritize diversity).`;
 
-For ingredients:
-1. CORE: required for the dish.
-2. OPTIONAL: enhancements.
-3. SUBSTITUTIONS: alternatives for the same role.
+const STAGE2_CHEF_SYSTEM = `You are a professional chef.
 
-For steps:
-- Rewrite from scratch using your finalized ingredient list.
-- Actionable, ordered, beginner-friendly, with timing and tools.
+You are given multiple versions of a recipe as CANDIDATE LISTS (ingredients, steps, tips). The same dish may appear in conflicting forms.
 
-For knowledge:
-- tips, mistakes (warnings), techniques
+Your job is to decide the BEST single recipe — not to average or list everything.
+
+INGREDIENTS:
+- Identify CORE ingredients (absolutely required for an authentic, correct dish).
+- Identify OPTIONAL ingredients (enhancements, garnishes, nice-to-have).
+- Identify SUBSTITUTIONS: groups that serve the same role (original + alternatives).
+
+CRITICAL:
+- Do NOT rely on frequency across candidates — use culinary knowledge of the dish.
+- Prioritize correctness and authenticity over including every candidate.
+
+STEPS:
+- Rewrite steps from scratch in logical order.
+- Use ONLY ingredients from your finalized core + optional lists (or substitutions you defined).
+- Each step must be: actionable, ordered, with time_minutes, tools[], goal, clear instructions.
+
+TIPS / KNOWLEDGE:
+- tips: pro tips
+- mistakes: warnings / what to avoid
+- techniques: named techniques worth highlighting
 
 Return STRICT JSON only, no markdown:
 {
@@ -382,10 +406,10 @@ Return STRICT JSON only, no markdown:
 }
 
 Rules:
-- Use ALL sources; resolve conflicts toward the most authentic / traditional version.
 - Max 18 core, max 10 optional.
 - quantity null means to taste; unit may be empty.
-- time_minutes per step (0 only if instant).`;
+- time_minutes: realistic per step (0 only if instant).
+- Ingredients and steps must be mutually consistent — every ingredient used in steps must appear in core or optional (or be a stated substitution).`;
 
 function passesQualityGateRaw(
   out: {
@@ -479,8 +503,173 @@ function mapParsedSynthesis(
   };
 }
 
+const MAX_CANDIDATES_PER_LIST = 120;
+const MAX_CANDIDATE_CHARS = 38_000;
+
+type Stage1Candidates = {
+  ingredient_candidates: string[];
+  step_candidates: string[];
+  tip_candidates: string[];
+};
+
+function parseStage1Json(raw: string): Stage1Candidates | null {
+  try {
+    const p = JSON.parse(raw) as Record<string, unknown>;
+    const take = (k: string) =>
+      Array.isArray(p[k])
+        ? (p[k] as unknown[])
+            .map((x) => String(x).trim())
+            .filter(Boolean)
+            .slice(0, MAX_CANDIDATES_PER_LIST)
+        : [];
+    return {
+      ingredient_candidates: take("ingredient_candidates"),
+      step_candidates: take("step_candidates"),
+      tip_candidates: take("tip_candidates"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatCandidatesForChef(
+  c: Stage1Candidates,
+  rawFallback: string
+): string {
+  const fmt = (label: string, arr: string[]) =>
+    arr.length
+      ? `${label} (${arr.length} items):\n${arr.map((x, i) => `${i + 1}. ${x}`).join("\n")}`
+      : `${label}: (none extracted)`;
+
+  const parts = [
+    fmt("INGREDIENT CANDIDATES", c.ingredient_candidates),
+    fmt("STEP CANDIDATES", c.step_candidates),
+    fmt("TIP / WARNING / TECHNIQUE CANDIDATES", c.tip_candidates),
+  ];
+  let out = parts.join("\n\n---\n\n");
+  if (out.length > MAX_CANDIDATE_CHARS) {
+    out = out.slice(0, MAX_CANDIDATE_CHARS) + "\n… [truncated]";
+  }
+  if (
+    c.ingredient_candidates.length === 0 &&
+    c.step_candidates.length === 0 &&
+    rawFallback.trim()
+  ) {
+    out +=
+      "\n\n---\n\nRAW SOURCE (use if candidates were empty):\n" +
+      rawFallback.slice(0, 60_000);
+  }
+  return out;
+}
+
+const STEP_COMMON_WORDS = new Set(
+  `the and then into from with each side over heat until about minutes minute hour hours
+  medium large small high low simmer boil bake fry roast grill stir whisk mix combine add remove
+  place cover uncover bowl pan pot oven stove skillet saucepan dutch sheet tray plate serving
+  lightly golden brown soft thick thin smooth rough chopped diced minced sliced grated peeled
+  optional garnish serve immediately transfer reserve leftover next finally first last once twice
+  preheat reduce increase bring cool warm room temperature refrigerate freeze thaw drain rinse pat
+  dry moist tender crisp done cooked through internal thermometer degrees fahrenheit celsius
+  tablespoon tablespoons teaspoon teaspoons cup cups ounce ounces pound pounds gram grams ml liter
+  inch inches cm half quarter thirds double recipe yield serves servings portion portions`
+    .split(/\s+/)
+    .filter(Boolean)
+);
+
+function buildIngredientTokenSet(
+  core: StructuredIngredient[],
+  optional: StructuredIngredient[]
+): Set<string> {
+  const s = new Set<string>();
+  for (const ing of [...core, ...optional]) {
+    const t = `${ing.name} ${ing.original}`.toLowerCase();
+    for (const w of t.split(/\W+/)) {
+      if (w.length >= 3) s.add(w);
+    }
+  }
+  return s;
+}
+
 /**
- * Full chef synthesis from joined raw captures (not structured merge).
+ * Reject chef output if steps ignore core items or reference many unknown tokens.
+ */
+function validateChefDecisionOutput(
+  mapped: ReturnType<typeof mapParsedSynthesis>,
+  stage1IngredientCount: number
+): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const core = mapped.ingredients.core;
+  const opt = mapped.ingredients.optional;
+  const steps = mapped.steps;
+  const stepsText = steps.map((s) => s.instructions.toLowerCase()).join(" \n ");
+
+  if (core.length === 0 && steps.length === 0) {
+    reasons.push("No core ingredients and no steps.");
+    return { ok: false, reasons };
+  }
+
+  if (
+    core.length === 0 &&
+    steps.length >= 2 &&
+    stage1IngredientCount >= 8
+  ) {
+    reasons.push(
+      "Many ingredients appeared in sources but core is empty — assign required items to core."
+    );
+  }
+
+  const ingTokens = buildIngredientTokenSet(core, opt);
+  const stepWords = stepsText.match(/\b[a-z]{5,}\b/g) || [];
+  const unknown = new Set<string>();
+  for (const w of stepWords) {
+    if (STEP_COMMON_WORDS.has(w)) continue;
+    if (ingTokens.has(w)) continue;
+    if (w.length > 5 && ingTokens.has(w.slice(0, -1))) continue;
+    if (w.endsWith("s") && w.length > 5 && ingTokens.has(w.slice(0, -1)))
+      continue;
+    if (w.endsWith("es") && ingTokens.has(w.slice(0, -2))) continue;
+    unknown.add(w);
+  }
+  if (unknown.size > 14) {
+    const sample = Array.from(unknown).slice(0, 5).join(", ");
+    reasons.push(
+      `Steps reference many terms not in your ingredient list (e.g. ${sample}). Add missing ingredients or rewrite steps to use only listed items.`
+    );
+  }
+
+  const pantryRe = /^(salt|pepper|water|ice|oil|sugar|stock|broth|spray)$/i;
+  let missingCore = 0;
+  const missingNames: string[] = [];
+  for (const ing of core) {
+    const raw = (ing.name || ing.original || "").trim();
+    if (!raw || raw.length < 2) continue;
+    if (pantryRe.test(raw.split(/\s+/)[0] || "")) continue;
+    const lower = raw.toLowerCase();
+    const toks = lower
+      .split(/\s+/)
+      .map((t) => t.replace(/[^a-z0-9]/g, ""))
+      .filter((t) => t.length >= 4);
+    const hit =
+      toks.some((t) => stepsText.includes(t)) ||
+      (lower.length >= 5 && stepsText.includes(lower));
+    if (!hit) {
+      missingCore++;
+      if (missingNames.length < 6) missingNames.push(ing.name || raw);
+    }
+  }
+  const allowMissing = Math.max(1, Math.ceil(core.length * 0.3));
+  if (core.length >= 2 && missingCore > allowMissing) {
+    reasons.push(
+      `Core ingredients never appear in steps: ${missingNames.join(", ")}. Use each major core item in at least one step.`
+    );
+  }
+
+  return { ok: reasons.length === 0, reasons };
+}
+
+/**
+ * Two-stage: (1) extract all candidates from raw corpus, (2) chef decides one authoritative recipe.
+ * Validates consistency; retries stage 2 once if invalid.
  */
 export async function synthesizeRecipeFromCombinedRaw(
   combinedText: string,
@@ -495,16 +684,35 @@ export async function synthesizeRecipeFromCombinedRaw(
   const body = trimmed.slice(0, 120_000);
   const combinedLen = trimmed.length;
 
-  const run = async (extraUserHint?: string) => {
+  const runStage1 = async (hint?: string) => {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: SYNTHESIS_FROM_RAW_SYSTEM },
+        { role: "system", content: STAGE1_EXTRACT_SYSTEM },
         {
           role: "user",
           content:
-            `Here is all captured recipe source text (blocks separated by ---). Synthesize ONE recipe:\n\n${body}` +
-            (extraUserHint ? `\n\n${extraUserHint}` : ""),
+            `Extract all candidates from this recipe source text (blocks may be separated by ---):\n\n${body}` +
+            (hint ? `\n\n${hint}` : ""),
+        },
+      ],
+      response_format: { type: "json_object" },
+    });
+    return completion.choices[0]?.message?.content ?? "";
+  };
+
+  const runStage2 = async (chefUserContent: string, extraHint?: string) => {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: STAGE2_CHEF_SYSTEM },
+        {
+          role: "user",
+          content:
+            chefUserContent +
+            (extraHint
+              ? `\n\n---\n\nVALIDATION FIX REQUIRED:\n${extraHint}`
+              : ""),
         },
       ],
       response_format: { type: "json_object" },
@@ -513,16 +721,59 @@ export async function synthesizeRecipeFromCombinedRaw(
   };
 
   try {
-    let raw = await run();
-    let parsed = JSON.parse(raw) as Record<string, unknown>;
+    let stage1Raw = await runStage1();
+    let candidates = parseStage1Json(stage1Raw);
+    if (
+      !candidates ||
+      (candidates.ingredient_candidates.length === 0 &&
+        candidates.step_candidates.length === 0)
+    ) {
+      stage1Raw = await runStage1(
+        "IMPORTANT: Return non-empty ingredient_candidates and step_candidates whenever the text describes a recipe."
+      );
+      candidates = parseStage1Json(stage1Raw);
+    }
+    if (!candidates) {
+      candidates = {
+        ingredient_candidates: [],
+        step_candidates: [],
+        tip_candidates: [],
+      };
+    }
+
+    const stage1IngCount = candidates.ingredient_candidates.length;
+    let chefInput = formatCandidatesForChef(candidates, body);
+    let stage2Raw = await runStage2(chefInput);
+    let parsed = JSON.parse(stage2Raw) as Record<string, unknown>;
     let result = mapParsedSynthesis(parsed, fallbackTitle);
 
     if (!passesQualityGateRaw(result, combinedLen)) {
-      raw = await run(
-        "IMPORTANT: Previous output was empty. You MUST output non-empty core ingredients and clear steps when the source text describes a real recipe."
+      stage2Raw = await runStage2(
+        chefInput,
+        "Output was incomplete. Produce non-empty core ingredients and clear steps for this dish."
       );
-      parsed = JSON.parse(raw) as Record<string, unknown>;
+      parsed = JSON.parse(stage2Raw) as Record<string, unknown>;
       result = mapParsedSynthesis(parsed, fallbackTitle);
+    }
+
+    let v = validateChefDecisionOutput(result, stage1IngCount);
+    if (!v.ok) {
+      console.warn(
+        "[synthesis-from-raw] validation failed, retry stage2:",
+        v.reasons.join(" | ")
+      );
+      stage2Raw = await runStage2(
+        chefInput,
+        v.reasons.join("\n")
+      );
+      parsed = JSON.parse(stage2Raw) as Record<string, unknown>;
+      result = mapParsedSynthesis(parsed, fallbackTitle);
+      v = validateChefDecisionOutput(result, stage1IngCount);
+      if (!v.ok) {
+        console.warn(
+          "[synthesis-from-raw] validation still failing after retry; returning best effort"
+        );
+      }
     }
 
     return {

@@ -209,34 +209,17 @@ export async function POST(req: NextRequest) {
             structured,
             openaiKey
           )) ?? heuristicDiffSummary(structured);
-        let ingredient_changes = [...aiPart.ingredient_changes];
-        let step_changes = [...aiPart.step_changes];
-        let new_insights = [...aiPart.new_insights];
-        if (!ingredient_changes.length) {
-          for (const x of structured.added_core.slice(0, 4)) {
-            ingredient_changes.push(`Added to core: ${x}`);
+        let key_improvements = [...aiPart.key_improvements];
+        if (key_improvements.length < 2) {
+          const h = heuristicDiffSummary(structured).key_improvements;
+          const seen = new Set(key_improvements.map((x) => x.slice(0, 50)));
+          for (const line of h) {
+            if (key_improvements.length >= 8) break;
+            if (!seen.has(line.slice(0, 50))) {
+              seen.add(line.slice(0, 50));
+              key_improvements.push(line);
+            }
           }
-          for (const x of structured.removed_core.slice(0, 3)) {
-            ingredient_changes.push(`Removed from core: ${x}`);
-          }
-          for (const x of structured.moved_optional_to_core.slice(0, 3)) {
-            ingredient_changes.push(`Promoted to core: ${x}`);
-          }
-        }
-        if (!step_changes.length) {
-          if (structured.steps_new.length) {
-            step_changes.push(
-              `${structured.steps_new.length} new step(s)`
-            );
-          }
-          if (structured.steps_modified.length) {
-            step_changes.push(
-              `${structured.steps_modified.length} step(s) clarified or reordered`
-            );
-          }
-        }
-        if (!new_insights.length) {
-          new_insights = heuristicDiffSummary(structured).new_insights;
         }
         const at = new Date().toISOString();
         const last_diff = {
@@ -244,18 +227,14 @@ export async function POST(req: NextRequest) {
           source_count_after: sourcesAfter,
           structured,
           summary: aiPart.summary,
-          ingredient_changes: ingredient_changes.slice(0, 12),
-          step_changes: step_changes.slice(0, 10),
-          new_insights: new_insights.slice(0, 10),
+          key_improvements: key_improvements.slice(0, 12),
         };
         const prevVer = Array.isArray(rec.versions) ? rec.versions : [];
         const versionEntry = {
           at,
           source_count_after: sourcesAfter,
           summary: last_diff.summary,
-          ingredient_changes: last_diff.ingredient_changes.slice(0, 6),
-          step_changes: last_diff.step_changes.slice(0, 6),
-          new_insights: last_diff.new_insights.slice(0, 6),
+          key_improvements: last_diff.key_improvements.slice(0, 8),
         };
         const versions = [versionEntry, ...prevVer].slice(0, 10);
 

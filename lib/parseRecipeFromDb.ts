@@ -137,14 +137,23 @@ function parseLastDiff(raw: unknown): RecipeLastDiff | null {
   const ins = Array.isArray(o.new_insights)
     ? o.new_insights.map(String)
     : [];
-  if (!summary && !ing.length && !st.length && !ins.length) return null;
+  let key_improvements = Array.isArray(o.key_improvements)
+    ? o.key_improvements.map(String).filter(Boolean)
+    : [];
+  if (!key_improvements.length) {
+    key_improvements = [...ins, ...ing.map((x) => `Ingredients: ${x}`), ...st.map((x) => `Steps: ${x}`)].filter(
+      Boolean
+    );
+  }
+  if (!summary && !key_improvements.length) return null;
   return {
     at: String(o.at ?? ""),
     source_count_after: Number(o.source_count_after) || 0,
     summary: summary || "Recipe updated.",
-    ingredient_changes: ing,
-    step_changes: st,
-    new_insights: ins,
+    key_improvements: key_improvements.slice(0, 16),
+    ...(ing.length ? { ingredient_changes: ing } : {}),
+    ...(st.length ? { step_changes: st } : {}),
+    ...(ins.length ? { new_insights: ins } : {}),
     structured:
       o.structured && typeof o.structured === "object"
         ? (o.structured as RecipeLastDiff["structured"])
@@ -158,19 +167,22 @@ function parseVersions(raw: unknown): RecipeDiffVersionEntry[] {
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const v = item as Record<string, unknown>;
+    const vIng = Array.isArray(v.ingredient_changes)
+      ? v.ingredient_changes.map(String)
+      : [];
+    const vSt = Array.isArray(v.step_changes) ? v.step_changes.map(String) : [];
+    const vIns = Array.isArray(v.new_insights) ? v.new_insights.map(String) : [];
+    let vKey = Array.isArray(v.key_improvements)
+      ? v.key_improvements.map(String).filter(Boolean)
+      : [];
+    if (!vKey.length) {
+      vKey = [...vIns, ...vIng.map((x) => `Ingredients: ${x}`), ...vSt.map((x) => `Steps: ${x}`)];
+    }
     out.push({
       at: String(v.at ?? ""),
       source_count_after: Number(v.source_count_after) || 0,
       summary: String(v.summary ?? ""),
-      ingredient_changes: Array.isArray(v.ingredient_changes)
-        ? v.ingredient_changes.map(String)
-        : [],
-      step_changes: Array.isArray(v.step_changes)
-        ? v.step_changes.map(String)
-        : [],
-      new_insights: Array.isArray(v.new_insights)
-        ? v.new_insights.map(String)
-        : [],
+      key_improvements: vKey.slice(0, 8),
     });
   }
   return out;

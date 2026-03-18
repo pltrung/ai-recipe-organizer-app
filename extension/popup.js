@@ -24,25 +24,26 @@ function showView(name) {
 function fillDiffModal(d) {
   const sum = document.getElementById("diff-summary");
   sum.textContent = (d && d.summary) || "Recipe improved with your new source.";
-  function fillList(id, wrapId, arr) {
-    const ul = document.getElementById(id);
-    const wrap = document.getElementById(wrapId);
-    ul.innerHTML = "";
-    const list = Array.isArray(arr) ? arr : [];
-    if (!list.length) {
-      wrap.style.display = "none";
-      return;
-    }
-    wrap.style.display = "block";
-    list.forEach((t) => {
-      const li = document.createElement("li");
-      li.textContent = String(t);
-      ul.appendChild(li);
-    });
+  let list = Array.isArray(d.key_improvements) ? d.key_improvements : [];
+  if (!list.length) {
+    list = []
+      .concat(d.new_insights || [])
+      .concat((d.ingredient_changes || []).map((x) => "Ingredients: " + x))
+      .concat((d.step_changes || []).map((x) => "Steps: " + x));
   }
-  fillList("diff-insights", "diff-insights-wrap", d.new_insights);
-  fillList("diff-ing", "diff-ing-wrap", d.ingredient_changes);
-  fillList("diff-step", "diff-step-wrap", d.step_changes);
+  const ul = document.getElementById("diff-key-improvements");
+  const wrap = document.getElementById("diff-key-wrap");
+  ul.innerHTML = "";
+  if (!list.length) {
+    wrap.style.display = "none";
+    return;
+  }
+  wrap.style.display = "block";
+  list.forEach((t) => {
+    const li = document.createElement("li");
+    li.textContent = String(t);
+    ul.appendChild(li);
+  });
 }
 
 function escapeHtml(s) {
