@@ -52,12 +52,34 @@ export type RecipeStep = {
   goal: string;
   /** When set (synthesis), preferred for display ordering */
   time_minutes?: number;
+  /** Inline cautions (new synthesis) */
+  warnings?: string[];
 };
 
-/** Substitution groups from synthesis */
+/** Substitution groups — new shape + legacy original/alternatives */
 export type RecipeSubstitutionEntry = {
-  original: string;
-  alternatives: string[];
+  /** Primary ingredient name */
+  ingredient: string;
+  options: string[];
+  note?: string;
+  /** Legacy DB rows */
+  original?: string;
+  alternatives?: string[];
+};
+
+/** Payload from synthesis before DB merge */
+export type SynthesisDbPayload = {
+  title: string;
+  description: string;
+  ingredients: { core: StructuredIngredient[]; optional: StructuredIngredient[] };
+  steps: RecipeStep[];
+  tips: string[];
+  substitutionsDetailed: RecipeSubstitutionEntry[];
+  mistakes: string[];
+  techniques: string[];
+  estimated_time: string;
+  servings: string;
+  servings_base: number;
 };
 
 export interface ExtractedRecipe {

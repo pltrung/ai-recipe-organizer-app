@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { unstable_noStore as noStore } from "next/cache";
 import { createClient } from "@/lib/supabaseClient";
 import { RecipeView } from "@/components/RecipeView";
 import { RecipeUpdatedModal } from "@/components/RecipeUpdatedModal";
@@ -9,6 +10,7 @@ import type { Recipe } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 async function getRecipe(id: string): Promise<Recipe | null> {
+  noStore();
   const supabase = createClient();
   const { data, error } = await supabase
     .from("recipes")

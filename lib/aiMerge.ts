@@ -7,8 +7,8 @@ import type {
 import type { StructuredIngredient } from "./types";
 import {
   synthesizeRecipeFromVersions,
-  type SynthesisDbPayload,
 } from "./recipeSynthesis";
+import type { SynthesisDbPayload } from "./types";
 import { groupIngredientsBySourceOverlap, buildCleanedIngredientLinesForChef } from "./recipeIngredients";
 import { parseIngredientLine } from "./ingredientParser";
 import { servingsDisplayLabel } from "./ingredientScale";
@@ -101,7 +101,17 @@ type ChefRestructureResult = {
 };
 
 function stringsToSubstitutionEntries(lines: string[]): RecipeSubstitutionEntry[] {
-  return lines.map((s) => ({ original: s.trim(), alternatives: [] })).filter((x) => x.original);
+  return lines
+    .map((s) => {
+      const t = s.trim();
+      return {
+        ingredient: t,
+        options: [] as string[],
+        original: t,
+        alternatives: [] as string[],
+      };
+    })
+    .filter((x) => x.ingredient);
 }
 
 async function chefRestructure(

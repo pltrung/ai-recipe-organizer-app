@@ -8,7 +8,7 @@ import {
   mergedOutputToDbRow,
   synthesisPayloadToMerged,
 } from "@/lib/aiMerge";
-import { synthesizeRecipeFromCombinedRaw } from "@/lib/recipeSynthesis";
+import { synthesizeRecipeFromCombinedRawWithExtractions } from "@/lib/recipeSynthesis";
 import { RAW_TEXT_JOINER } from "@/lib/recipeSourceHistory";
 import type { ExtractedRecipe } from "@/lib/types";
 import { parseIngredientLine } from "@/lib/ingredientParser";
@@ -239,11 +239,13 @@ export async function POST(req: NextRequest) {
 
     if (successfulRecipes.length === 0) {
       if (historyRawTexts.length > 0) {
-        const synthOnly = await synthesizeRecipeFromCombinedRaw(
+        const phasedOnly = await synthesizeRecipeFromCombinedRawWithExtractions(
           combinedText,
           openaiKey,
-          dishName || "Recipe"
+          dishName || "Recipe",
+          { sources: historySources, raw_texts: historyRawTexts }
         );
+        const synthOnly = phasedOnly?.payload;
         if (synthOnly) {
           const dbPayload = mergedOutputToDbRow(
             synthesisPayloadToMerged(synthOnly)
@@ -255,6 +257,18 @@ export async function POST(req: NextRequest) {
             const supabase = createServerClient();
             const title =
               dishName && dishName.length > 0 ? dishName : dbPayload.title;
+            const srcEx =
+              phasedOnly?.source_extractions?.map((ex, i) => ({
+                source_url: historySources[i] ?? ex.source_label,
+                source_type:
+                  detectPlatform(String(historySources[i] || "")) ||
+                  sourcePlatforms[i] ||
+                  "website",
+                raw_text: String(historyRawTexts[i] ?? "").slice(0, 8000),
+                ingredient_candidates: ex.ingredient_candidates,
+                step_candidates: ex.step_candidates,
+                tip_candidates: ex.tip_candidates,
+              })) ?? null;
             const { data, error } = await supabase
               .from("recipes")
               .insert({
@@ -275,6 +289,7 @@ export async function POST(req: NextRequest) {
                 raw_text: rawTextParts.join("\n\n") || null,
                 sources: historySources,
                 raw_texts: historyRawTexts,
+                source_extractions: srcEx,
                 needs_review: false,
                 needs_user_input: false,
                 updated_at: new Date().toISOString(),
@@ -362,11 +377,26 @@ export async function POST(req: NextRequest) {
     let dbPayload: ReturnType<typeof mergedOutputToDbRow>;
     let needsReview = false;
 
-    const synth = await synthesizeRecipeFromCombinedRaw(
+    const phasedMain = await synthesizeRecipeFromCombinedRawWithExtractions(
       combinedText,
       openaiKey,
-      dishName || successfulRecipes[0]?.title || "Recipe"
+      dishName || successfulRecipes[0]?.title || "Recipe",
+      { sources: historySources, raw_texts: historyRawTexts }
     );
+    const synth = phasedMain?.payload;
+    let source_extractions: unknown =
+      phasedMain?.source_extractions?.map((ex, i) => ({
+        source_url: historySources[i] ?? ex.source_label,
+        source_type:
+          detectPlatform(String(historySources[i] || "")) ||
+          sourcePlatforms[i] ||
+          "website",
+        raw_text: String(historyRawTexts[i] ?? "").slice(0, 8000),
+        ingredient_candidates: ex.ingredient_candidates,
+        step_candidates: ex.step_candidates,
+        tip_candidates: ex.tip_candidates,
+      })) ?? null;
+
     if (synth) {
       const merged = synthesisPayloadToMerged(synth);
       dbPayload = mergedOutputToDbRow(merged);
@@ -374,6 +404,7 @@ export async function POST(req: NextRequest) {
         dbPayload.ingredients.core.length + dbPayload.ingredients.optional.length;
       if (ingN === 0 && dbPayload.steps.length === 0) {
         needsReview = true;
+        source_extractions = null;
         let mergedOut =
           (await mergeRecipesIntelligent(successfulRecipes, openaiKey)) ??
           null;
@@ -391,6 +422,7 @@ export async function POST(req: NextRequest) {
       }
     } else {
       needsReview = true;
+      source_extractions = null;
       let mergedOut =
         (await mergeRecipesIntelligent(successfulRecipes, openaiKey)) ?? null;
       if (!mergedOut) {
@@ -423,6 +455,7 @@ export async function POST(req: NextRequest) {
       sources: historySources.length ? historySources : sourceUrls,
       raw_texts: historyRawTexts.length ? historyRawTexts : [],
       needs_review: needsReview,
+      source_extractions,
     };
 
     const supabase = createServerClient();
@@ -449,6 +482,7 @@ export async function POST(req: NextRequest) {
         raw_text: recipeRow.raw_text,
         sources: recipeRow.sources,
         raw_texts: recipeRow.raw_texts,
+        source_extractions: recipeRow.source_extractions,
         needs_review: recipeRow.needs_review,
         needs_user_input: needsUserInput,
         updated_at: new Date().toISOString(),

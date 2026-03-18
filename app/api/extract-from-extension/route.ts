@@ -12,7 +12,7 @@ import {
   fallbackStructuredSteps,
 } from "@/lib/structuredSteps";
 import { EXTENSION_CORS_HEADERS } from "@/lib/extensionCors";
-import { synthesizeRecipeFromCombinedRaw } from "@/lib/recipeSynthesis";
+import { synthesizeRecipeFromCombinedRawWithExtractions } from "@/lib/recipeSynthesis";
 import {
   hydrateRecipeSourceHistory,
   RAW_TEXT_JOINER,
@@ -153,13 +153,27 @@ export async function POST(req: NextRequest) {
       let synthOk = false;
       let dbPayload: ReturnType<typeof mergedOutputToDbRow> | null = null;
 
+      let sourceExtractions: unknown = null;
       if (openaiKey && combinedText.trim().length > 0) {
         try {
-          const synth = await synthesizeRecipeFromCombinedRaw(
+          const phased = await synthesizeRecipeFromCombinedRawWithExtractions(
             combinedText,
             openaiKey,
-            fallbackTitle
+            fallbackTitle,
+            { sources: nextSources, raw_texts: nextRawTexts }
           );
+          const synth = phased?.payload;
+          sourceExtractions = phased?.source_extractions
+            ? phased.source_extractions.map((ex, i) => ({
+                source_url: nextSources[i] ?? ex.source_label,
+                source_type:
+                  detectPlatform(String(nextSources[i] || "")) || plat,
+                raw_text: String(nextRawTexts[i] ?? "").slice(0, 8000),
+                ingredient_candidates: ex.ingredient_candidates,
+                step_candidates: ex.step_candidates,
+                tip_candidates: ex.tip_candidates,
+              }))
+            : null;
           if (synth) {
             const merged = synthesisPayloadToMerged(synth);
             dbPayload = mergedOutputToDbRow(merged);
@@ -210,17 +224,10 @@ export async function POST(req: NextRequest) {
             openaiKey
           )) ?? heuristicDiffSummary(structured);
         let key_improvements = [...aiPart.key_improvements];
-        if (key_improvements.length < 2) {
-          const h = heuristicDiffSummary(structured).key_improvements;
-          const seen = new Set(key_improvements.map((x) => x.slice(0, 50)));
-          for (const line of h) {
-            if (key_improvements.length >= 8) break;
-            if (!seen.has(line.slice(0, 50))) {
-              seen.add(line.slice(0, 50));
-              key_improvements.push(line);
-            }
-          }
+        if (key_improvements.length === 0) {
+          key_improvements = heuristicDiffSummary(structured).key_improvements;
         }
+        key_improvements = key_improvements.slice(0, 5);
         const at = new Date().toISOString();
         const last_diff = {
           at,
@@ -257,6 +264,7 @@ export async function POST(req: NextRequest) {
             sources: nextSources,
             raw_texts: nextRawTexts,
             raw_text: combinedText || null,
+            source_extractions: sourceExtractions,
             needs_user_input,
             needs_review: false,
             last_diff,
@@ -359,16 +367,19 @@ export async function POST(req: NextRequest) {
         updated_at: new Date().toISOString(),
       };
     } else {
-      const synthNew = await synthesizeRecipeFromCombinedRaw(
+      const phasedNew = await synthesizeRecipeFromCombinedRawWithExtractions(
         rawText,
         openaiKey,
-        recipeNameOpt || "Recipe"
+        recipeNameOpt || "Recipe",
+        { sources, raw_texts }
       );
+      const synthNew = phasedNew?.payload;
       if (synthNew) {
         const dbPayload = mergedOutputToDbRow(synthesisPayloadToMerged(synthNew));
         const ingTotal =
           dbPayload.ingredients.core.length + dbPayload.ingredients.optional.length;
         const needs = ingTotal === 0 && dbPayload.steps.length === 0;
+        const ext = phasedNew?.source_extractions?.[0];
         insertRow = {
           user_id: null,
           title: recipeNameOpt || dbPayload.title,
@@ -387,6 +398,18 @@ export async function POST(req: NextRequest) {
           sources,
           raw_texts,
           raw_text: rawText || null,
+          source_extractions: ext
+            ? [
+                {
+                  source_url: sources[0],
+                  source_type: plat,
+                  raw_text: rawText.slice(0, 8000),
+                  ingredient_candidates: ext.ingredient_candidates,
+                  step_candidates: ext.step_candidates,
+                  tip_candidates: ext.tip_candidates,
+                },
+              ]
+            : null,
           needs_user_input: needs,
           needs_review: false,
           updated_at: new Date().toISOString(),

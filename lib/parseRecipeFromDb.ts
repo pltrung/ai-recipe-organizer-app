@@ -43,12 +43,23 @@ function parseOneStep(item: unknown, index: number): RecipeStep | null {
   const goal =
     typeof o.goal === "string" && o.goal.trim()
       ? o.goal.trim()
-      : "Complete this step before moving on.";
+      : "";
   let time_minutes: number | undefined;
   if (typeof o.time_minutes === "number" && !Number.isNaN(o.time_minutes)) {
     time_minutes = Math.round(o.time_minutes);
   }
-  return { title, instructions, time, tools, goal, time_minutes };
+  const warnings = Array.isArray(o.warnings)
+    ? o.warnings.map((x) => String(x).trim()).filter(Boolean)
+    : [];
+  return {
+    title,
+    instructions,
+    time,
+    tools,
+    goal: goal || (warnings[0] ? "" : "Complete this step before moving on."),
+    time_minutes,
+    ...(warnings.length ? { warnings } : {}),
+  };
 }
 
 export function parseStepsFromDb(raw: unknown): RecipeStep[] {
@@ -99,16 +110,35 @@ export function parseSubstitutionsFromDb(
   for (const item of raw) {
     if (typeof item === "string") {
       const t = item.trim();
-      if (t) out.push({ original: t, alternatives: [] });
+      if (t)
+        out.push({
+          ingredient: t,
+          options: [],
+          original: t,
+          alternatives: [],
+        });
       continue;
     }
     if (item && typeof item === "object") {
       const o = item as Record<string, unknown>;
-      const original = String(o.original ?? o.name ?? "").trim();
-      const alts = Array.isArray(o.alternatives)
-        ? o.alternatives.map((a) => String(a).trim()).filter(Boolean)
-        : [];
-      if (original) out.push({ original, alternatives: alts });
+      const ingredient = String(
+        o.ingredient ?? o.original ?? o.name ?? ""
+      ).trim();
+      const options = Array.isArray(o.options)
+        ? o.options.map((a) => String(a).trim()).filter(Boolean)
+        : Array.isArray(o.alternatives)
+          ? o.alternatives.map((a) => String(a).trim()).filter(Boolean)
+          : [];
+      const note =
+        typeof o.note === "string" && o.note.trim() ? o.note.trim() : undefined;
+      if (ingredient)
+        out.push({
+          ingredient,
+          options,
+          note,
+          original: ingredient,
+          alternatives: options,
+        });
     }
   }
   return out;

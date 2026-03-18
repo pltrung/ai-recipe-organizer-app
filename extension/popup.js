@@ -364,7 +364,9 @@ document.getElementById("btn-view-recipe").addEventListener("click", async () =>
   const base = lastBase || (await getBackendBase()) || DEFAULT_BASES[0];
   if (id) {
     const bust = Date.now();
-    await chrome.tabs.create({ url: `${base}/recipe/${id}?updated=${bust}` });
+    await chrome.tabs.create({
+      url: `${base}/recipe/${id}?updated=${bust}&cb=${Date.now()}`,
+    });
   }
   window.close();
 });

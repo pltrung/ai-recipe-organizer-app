@@ -21,8 +21,6 @@ import { RecipeUpdatedModal } from "@/components/RecipeUpdatedModal";
 
 const EMPTY_ING: StructuredIngredient[] = [];
 
-type KnowledgeTab = "tips" | "mistakes" | "techniques";
-
 type RecipeViewProps = {
   recipe: Recipe;
   sourceCount?: number;
@@ -90,8 +88,6 @@ export function RecipeView({
   const substitutions = Array.isArray(recipe.substitutions)
     ? recipe.substitutions
     : [];
-  const mistakes = Array.isArray(recipe.mistakes) ? recipe.mistakes : [];
-  const techniques = Array.isArray(recipe.techniques) ? recipe.techniques : [];
   const sourceUrls = Array.isArray(recipe.source_urls) ? recipe.source_urls : [];
   const versions = recipe.versions ?? [];
 
@@ -111,19 +107,9 @@ export function RecipeView({
   const baseServings = Math.max(1, recipe.servings_base ?? 1);
   const [targetServings, setTargetServings] = useState(baseServings);
   const [showScaled, setShowScaled] = useState(true);
-  const firstKTab: KnowledgeTab = tips.length
-    ? "tips"
-    : mistakes.length
-      ? "mistakes"
-      : "techniques";
-  const [kTab, setKTab] = useState<KnowledgeTab>(firstKTab);
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-
-  useEffect(() => {
-    setKTab(firstKTab);
-  }, [recipe.id, firstKTab]);
 
   useEffect(() => {
     setTargetServings(baseServings);
@@ -155,8 +141,6 @@ export function RecipeView({
     recipe.source_platforms?.length ?? 0,
     1
   );
-
-  const hasKnowledge = tips.length || mistakes.length || techniques.length;
 
   return (
     <article className="mx-auto max-w-[720px] space-y-6 px-1 sm:px-0">
@@ -234,16 +218,6 @@ export function RecipeView({
           </span>
         </div>
       </header>
-
-      {!showBuilderCta && steps.length > 0 && (
-        <button
-          type="button"
-          onClick={scrollToCooking}
-          className="w-full rounded-xl bg-emerald-600 py-4 text-base font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 active:scale-[0.995]"
-        >
-          Start cooking
-        </button>
-      )}
 
       {/* Servings */}
       {ingTotal > 0 && (
@@ -338,10 +312,10 @@ export function RecipeView({
             <section className="overflow-hidden rounded-xl border border-neutral-200/90 bg-white shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06)]">
               <div className="border-b border-neutral-100 bg-neutral-50/50 px-5 py-4">
                 <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-700">
-                  Optional ingredients
+                  Optional & customize
                 </h2>
                 <p className="mt-1 text-xs text-neutral-500">
-                  Garnishes & enhancements
+                  Skip or adjust to taste
                 </p>
               </div>
               <div className="px-5 py-1">
@@ -366,29 +340,37 @@ export function RecipeView({
           </h2>
           <ul className="mt-4 space-y-4">
             {substitutions.map((sub, i) => {
-              const original =
+              const o = typeof sub === "object" && sub ? sub : null;
+              const main =
                 typeof sub === "string"
                   ? sub
-                  : (sub as { original?: string }).original ?? "";
+                  : String(
+                      o?.ingredient ?? o?.original ?? ""
+                    ).trim();
               const alts =
-                typeof sub === "object" &&
-                sub &&
-                Array.isArray((sub as { alternatives?: string[] }).alternatives)
-                  ? (sub as { alternatives: string[] }).alternatives
-                  : [];
-              if (!original) return null;
+                o && Array.isArray(o.options) && o.options.length
+                  ? o.options
+                  : o && Array.isArray(o.alternatives)
+                    ? o.alternatives
+                    : [];
+              const note = o?.note?.trim();
+              if (!main) return null;
               return (
-                <li
-                  key={i}
-                  className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[15px]"
-                >
-                  <span className="font-semibold text-orange-950">{original}</span>
-                  {alts.length > 0 && (
-                    <>
-                      <span className="text-orange-800/70">→</span>
-                      <span className="text-orange-900/95">{alts.join(" · ")}</span>
-                    </>
-                  )}
+                <li key={i} className="space-y-1 text-[15px]">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <span className="font-semibold text-orange-950">{main}</span>
+                    {alts.length > 0 && (
+                      <>
+                        <span className="text-orange-800/70">→</span>
+                        <span className="text-orange-900/95">
+                          {alts.join(" · ")}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  {note ? (
+                    <p className="text-xs text-orange-800/80">{note}</p>
+                  ) : null}
                 </li>
               );
             })}
@@ -400,57 +382,56 @@ export function RecipeView({
         <button
           type="button"
           onClick={scrollToCooking}
-          className="w-full rounded-xl bg-emerald-600 py-4 text-base font-semibold text-white shadow-md transition hover:bg-emerald-700 sm:hidden"
+          className="w-full rounded-xl bg-emerald-600 py-4 text-base font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 active:scale-[0.995]"
         >
           Start cooking
         </button>
       )}
 
       {/* Steps */}
-      <section id="recipe-steps" className="scroll-mt-24 space-y-5">
+      <section id="recipe-steps" className="scroll-mt-24 space-y-4">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-800">
           Steps
         </h2>
         {steps.length === 0 ? (
           <p className="text-sm text-neutral-400">No steps yet.</p>
         ) : (
-          <ol className="space-y-5">
+          <ol className="space-y-4">
             {steps.map((step, i) => (
               <li
                 key={i}
-                className="overflow-hidden rounded-xl border border-neutral-200/90 bg-white p-6 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.07)]"
+                className="rounded-xl border border-neutral-200/90 bg-white p-5 shadow-sm sm:p-6"
               >
                 <div className="flex gap-4">
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-sm font-bold text-white">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-sm font-bold text-white">
                     {i + 1}
                   </span>
-                  <div className="min-w-0 flex-1 space-y-3">
-                    <h3 className="text-lg font-semibold leading-snug text-neutral-900">
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <h3 className="text-base font-semibold text-neutral-900">
                       {step.title}
                     </h3>
-                    {step.time && step.time !== "—" && (
-                      <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
-                        {step.time}
-                      </p>
-                    )}
+                    <div className="flex flex-wrap gap-3 text-xs text-neutral-500">
+                      {step.time && step.time !== "—" && step.time !== "As needed" ? (
+                        <span>⏱ {step.time}</span>
+                      ) : null}
+                      {step.tools && step.tools.length > 0 ? (
+                        <span>🛠 {step.tools.join(", ")}</span>
+                      ) : null}
+                    </div>
                     <p className="text-[15px] leading-relaxed text-neutral-700">
                       {step.instructions}
                     </p>
-                    {step.tools && step.tools.length > 0 && (
-                      <p className="text-sm text-neutral-600">
-                        <span className="font-semibold text-neutral-800">
-                          Tools
-                        </span>
-                        {": "}
-                        {step.tools.join(", ")}
-                      </p>
-                    )}
-                    {step.goal && (
-                      <p className="rounded-lg bg-emerald-50/90 px-4 py-3 text-sm leading-relaxed text-emerald-900">
-                        <span className="font-semibold">Goal: </span>
-                        {step.goal}
-                      </p>
-                    )}
+                    {step.warnings && step.warnings.length > 0 ? (
+                      <ul className="space-y-1 rounded-lg border border-amber-200/80 bg-amber-50/80 px-3 py-2 text-sm text-amber-950">
+                        {step.warnings.map((w, j) => (
+                          <li key={j}>⚠ {w}</li>
+                        ))}
+                      </ul>
+                    ) : step.goal &&
+                      step.goal.length > 5 &&
+                      !step.goal.startsWith("Complete") ? (
+                      <p className="text-sm text-amber-900/90">{step.goal}</p>
+                    ) : null}
                   </div>
                 </div>
               </li>
@@ -459,82 +440,21 @@ export function RecipeView({
         )}
       </section>
 
-      {/* Knowledge tabs */}
-      {hasKnowledge && (
-        <section className="overflow-hidden rounded-xl border border-neutral-200/90 bg-white shadow-sm">
-          <div className="flex border-b border-neutral-100">
-            {tips.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setKTab("tips")}
-                className={`flex-1 px-4 py-3.5 text-sm font-semibold transition ${
-                  kTab === "tips"
-                    ? "border-b-2 border-blue-600 text-blue-800 bg-blue-50/30"
-                    : "text-neutral-500 hover:bg-neutral-50 hover:text-neutral-800"
-                }`}
-              >
-                Tips
-              </button>
-            )}
-            {mistakes.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setKTab("mistakes")}
-                className={`flex-1 px-4 py-3.5 text-sm font-semibold transition ${
-                  kTab === "mistakes"
-                    ? "border-b-2 border-red-500 text-red-900 bg-red-50/20"
-                    : "text-neutral-500 hover:bg-neutral-50 hover:text-neutral-800"
-                }`}
-              >
-                Mistakes
-              </button>
-            )}
-            {techniques.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setKTab("techniques")}
-                className={`flex-1 px-4 py-3.5 text-sm font-semibold transition ${
-                  kTab === "techniques"
-                    ? "border-b-2 border-violet-500 text-violet-900 bg-violet-50/20"
-                    : "text-neutral-500 hover:bg-neutral-50 hover:text-neutral-800"
-                }`}
-              >
-                Techniques
-              </button>
-            )}
-          </div>
-          <div className="p-5">
-            {kTab === "tips" && tips.length > 0 && (
-              <ul className="space-y-3 text-[15px] leading-relaxed text-blue-950">
-                {tips.map((tip, i) => (
-                  <li key={i} className="flex gap-3 border-l-2 border-blue-400/60 pl-4">
-                    {tip}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {kTab === "mistakes" && mistakes.length > 0 && (
-              <ul className="space-y-3 text-[15px] leading-relaxed text-red-950">
-                {mistakes.map((m, i) => (
-                  <li key={i} className="flex gap-3 border-l-2 border-red-400/60 pl-4">
-                    {m}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {kTab === "techniques" && techniques.length > 0 && (
-              <ul className="space-y-3 text-[15px] leading-relaxed text-violet-950">
-                {techniques.map((t, i) => (
-                  <li
-                    key={i}
-                    className="flex gap-3 border-l-2 border-violet-400/60 pl-4"
-                  >
-                    {t}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+      {tips.length > 0 && (
+        <section className="rounded-xl border border-neutral-200/90 bg-white p-5 shadow-sm">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-800">
+            Tips
+          </h2>
+          <ul className="mt-4 space-y-2.5 text-[15px] leading-relaxed text-neutral-700">
+            {tips.map((tip, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="text-emerald-600" aria-hidden>
+                  ·
+                </span>
+                <span>{tip}</span>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 
