@@ -29,14 +29,20 @@ async function getRecipe(id: string): Promise<Recipe | null> {
 
 export default async function RecipePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ from_reel?: string }>;
 }) {
   const { id } = await params;
+  const { from_reel } = await searchParams;
   const recipe = await getRecipe(id);
   if (!recipe) notFound();
 
-  const sourceCount = recipe.source_urls?.length ?? 0;
+  const sourceCount = Math.max(
+    recipe.source_platforms?.length ?? 0,
+    recipe.source_urls?.length ?? 0
+  );
 
   return (
     <div className="min-h-screen bg-[#fafafa]">
@@ -51,6 +57,12 @@ export default async function RecipePage({
         </div>
       </header>
       <main className="mx-auto max-w-2xl px-4 py-10">
+        {from_reel === "1" && (
+          <p className="mb-6 rounded-xl bg-amber-50 px-4 py-2 text-sm text-amber-800">
+            We created this recipe from a short video. Edit ingredients and
+            steps below if needed.
+          </p>
+        )}
         <RecipeView recipe={recipe} sourceCount={sourceCount} />
       </main>
     </div>

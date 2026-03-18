@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "OpenAI not configured" }, { status: 500 });
     }
     const platform = detectPlatform(url);
-    const rawText = await fetchContent(url);
+    const rawText = await fetchContent(url, platform);
     const recipe = await extractRecipe(rawText, key);
     if (!recipe) {
       return NextResponse.json({ error: "Extraction failed" }, { status: 422 });

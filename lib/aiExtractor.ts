@@ -1,8 +1,10 @@
 import type { ExtractedRecipe } from "./types";
 
-const EXTRACT_SYSTEM = `You are a recipe parser. Convert the given content into a single JSON object. 
-If the content is not a recipe, infer a sensible title and return empty arrays for ingredients and steps.
-Always return valid JSON only, no markdown or extra text.`;
+const EXTRACT_SYSTEM = `You are a recipe parser. Convert the given content into a single JSON object.
+- If the content is a full recipe: extract title, description, ingredients, steps, time, servings.
+- If the content is partial or from a short video: infer a sensible title and fill in likely ingredients and steps where possible; use empty arrays only when you cannot infer anything.
+- Always return valid JSON only, no markdown or extra text.
+- Your goal is to produce something usable for cooking; inference and filling gaps are allowed.`;
 
 const EXTRACT_USER = (raw: string) => `Convert this into a clean recipe JSON:
 
