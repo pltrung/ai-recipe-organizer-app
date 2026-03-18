@@ -84,27 +84,73 @@ export async function POST(req: NextRequest) {
     const sourcePlatforms: string[] = [];
     let hasReelInput = false;
 
-    for (const url of urls) {
-      const u = String(url).trim();
-      if (!u) continue;
+    const urlList = urls.map((u) => String(u).trim()).filter(Boolean);
+    for (const u of urlList) {
       if (classifyLink(u).strategy === "reel_fallback") hasReelInput = true;
       sourceUrls.push(u);
       sourcePlatforms.push(classifyLink(u).platform);
-
-      const outcome = await ingestUrl(u, openaiKey);
-      sourceReports.push(outcome.report);
-      if (outcome.rawForDb) rawTextParts.push(`--- ${u} ---\n${outcome.rawForDb}`);
-      if (outcome.recipe) successfulRecipes.push(outcome.recipe);
     }
 
-    for (let i = 0; i < images.length; i++) {
-      const img = images[i];
-      if (!img || typeof img !== "string") continue;
-      sourcePlatforms.push("image");
-      const outcome = await ingestImage(img, i, openaiKey);
-      sourceReports.push(outcome.report);
-      if (outcome.rawForDb) rawTextParts.push(`--- image ${i + 1} ---\n${outcome.rawForDb}`);
-      if (outcome.recipe) successfulRecipes.push(outcome.recipe);
+    const urlResults = await Promise.allSettled(
+      urlList.map((u) => ingestUrl(u, openaiKey))
+    );
+
+    for (let i = 0; i < urlList.length; i++) {
+      const u = urlList[i];
+      const settled = urlResults[i];
+      if (settled.status === "fulfilled") {
+        const outcome = settled.value;
+        sourceReports.push(outcome.report);
+        if (outcome.rawForDb)
+          rawTextParts.push(`--- ${u} ---\n${outcome.rawForDb}`);
+        if (outcome.recipe) successfulRecipes.push(outcome.recipe);
+      } else {
+        const reason =
+          settled.reason instanceof Error
+            ? settled.reason.message
+            : String(settled.reason ?? "Unknown error");
+        sourceReports.push({
+          source_url: u,
+          platform: classifyLink(u).platform,
+          status: "failed",
+          error: reason,
+        });
+      }
+    }
+
+    const imageEntries = images
+      .map((img, i) => ({ img, i }))
+      .filter(
+        (x): x is { img: string; i: number } =>
+          Boolean(x.img) && typeof x.img === "string"
+      );
+    for (const _ of imageEntries) sourcePlatforms.push("image");
+
+    const imageResults = await Promise.allSettled(
+      imageEntries.map(({ img, i }) => ingestImage(img, i, openaiKey))
+    );
+
+    for (let j = 0; j < imageEntries.length; j++) {
+      const { i } = imageEntries[j];
+      const settled = imageResults[j];
+      if (settled.status === "fulfilled") {
+        const outcome = settled.value;
+        sourceReports.push(outcome.report);
+        if (outcome.rawForDb)
+          rawTextParts.push(`--- image ${i + 1} ---\n${outcome.rawForDb}`);
+        if (outcome.recipe) successfulRecipes.push(outcome.recipe);
+      } else {
+        const reason =
+          settled.reason instanceof Error
+            ? settled.reason.message
+            : String(settled.reason ?? "Unknown error");
+        sourceReports.push({
+          source_url: `image:${i + 1}`,
+          platform: "image",
+          status: "failed",
+          error: reason,
+        });
+      }
     }
 
     const extractedCount = sourceReports.filter((r) => r.status === "success").length;

@@ -16,10 +16,15 @@ const FETCH_OPTS = {
   signal: AbortSignal.timeout(25000),
 };
 
-const ANTI_BOT_STRICT =
-  /cf-browser-verification|challenge-platform|hcaptcha|g-recaptcha|__cf_chl|data-cf-beacon/i;
-const ANTI_BOT_SOFT =
-  /please complete the security check|verify you are human|are you a robot|unusual traffic from your computer network/i;
+/** Only true Cloudflare interstitial / challenge — not beacon/widget on normal pages */
+const CLOUDFLARE_CHALLENGE =
+  /cf-browser-verification|challenge-platform|__cf_chl_opt|cdn-cgi\/challenge-platform/i;
+
+const MIN_HTML_TO_TRUST_CONTENT = 2000;
+
+function looksLikeCloudflareChallengeOnly(html: string): boolean {
+  return CLOUDFLARE_CHALLENGE.test(html);
+}
 
 const SECTION_KEYWORDS =
   /ingredients?|instructions?|method|how to (make|cook)|recipe|directions?|preparation|steps?/i;
@@ -39,9 +44,13 @@ export type WebsiteExtractResult = {
   debug: WebsiteExtractDebug;
 };
 
-function logDebug(url: string, debug: WebsiteExtractDebug) {
+function logDebug(url: string, html: string, debug: WebsiteExtractDebug) {
+  const head500 = html.slice(0, 500).replace(/\s+/g, " ");
   console.log(
-    `[RecipeCloud] website ${url} | html=${debug.htmlLength} cleaned=${debug.cleanedLength} jsonLd=${debug.jsonLdFound} preview=${debug.preview.slice(0, 500).replace(/\s+/g, " ")}`
+    `[RecipeCloud] website ${url} | htmlLength=${debug.htmlLength} | first500=${head500}`
+  );
+  console.log(
+    `[RecipeCloud] website ${url} | cleaned=${debug.cleanedLength} jsonLd=${debug.jsonLdFound} preview=${debug.preview.slice(0, 500).replace(/\s+/g, " ")}`
   );
 }
 
@@ -140,7 +149,7 @@ export async function extractWebsite(url: string): Promise<WebsiteExtractResult>
 
     if (!res.ok) {
       debug.preview = html.slice(0, 500);
-      logDebug(url, debug);
+      logDebug(url, html, debug);
       return {
         ok: false,
         raw_text: "",
@@ -150,14 +159,18 @@ export async function extractWebsite(url: string): Promise<WebsiteExtractResult>
       };
     }
 
-    if (ANTI_BOT_STRICT.test(html) || ANTI_BOT_SOFT.test(html.slice(0, 15000))) {
+    // Short page + Cloudflare challenge interstitial only — long HTML is real content (recipes on CF sites)
+    if (
+      html.length < MIN_HTML_TO_TRUST_CONTENT &&
+      looksLikeCloudflareChallengeOnly(html)
+    ) {
       debug.preview = html.slice(0, 500);
-      logDebug(url, debug);
+      logDebug(url, html, debug);
       return {
         ok: false,
         raw_text: "",
         confidence: "low",
-        error: "Anti-bot or verification page detected",
+        error: "Cloudflare challenge page (try again or use another link)",
         debug,
       };
     }
@@ -167,7 +180,7 @@ export async function extractWebsite(url: string): Promise<WebsiteExtractResult>
       debug.jsonLdFound = true;
       debug.cleanedLength = jsonLd.length;
       debug.preview = jsonLd.slice(0, 500);
-      logDebug(url, debug);
+      logDebug(url, html, debug);
       return {
         ok: true,
         raw_text: jsonLd.slice(0, 50000),
@@ -198,7 +211,7 @@ export async function extractWebsite(url: string): Promise<WebsiteExtractResult>
     combined = combined.replace(/\s+/g, " ").trim().slice(0, 50000);
     debug.cleanedLength = combined.length;
     debug.preview = combined.slice(0, 500);
-    logDebug(url, debug);
+    logDebug(url, html, debug);
 
     if (combined.length < 50) {
       return {
@@ -219,7 +232,7 @@ export async function extractWebsite(url: string): Promise<WebsiteExtractResult>
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Fetch failed";
     debug.preview = html.slice(0, 500);
-    logDebug(url, debug);
+    logDebug(url, html, debug);
     return {
       ok: false,
       raw_text: "",
