@@ -29,14 +29,15 @@ This document describes how the app works end-to-end: **phased synthesis** + **d
 
 - **Dish family** (dynamic playbook, after Phase B): **`lib/dynamicPlaybook.ts`** composes **`dish_family`** + flow from **universal primitives**, **family skeletons** (e.g. `noodle_soup`, `pizza_flatbread`, `braise_stew`), **cuisine lens**, and **anchors** from Phase A candidates + confidence. Stored in **`recipe_quality.dish_taxonomy`** as the family id (UI label). Phase C/D prompts include **`playbookForPhaseC` / `playbookForPhaseD`**.
 - **Source confidence** per chunk: `high` / `medium_high` / `medium` / `low` (blog/JSON-LD vs reel/DOM). Low-confidence-only lines must not become **core** unless dish-essential or corroborated.
-- **Consensus engine** (**`lib/ingredientConsensus.ts`**): before Phase C, clusters Phase A lines; **dish_anchors** included in consensus “lean CORE” hints.
-- **Dish anchors** (**`lib/dishAnchors.ts`**): per-family + name-based slots (e.g. karaage → protein, coating_starch, frying_oil, marinade_base). **materializeAnchorsFromLines** picks concrete lines from Phase A; merged into Phase B essentials after playbook; **enforceAnchorsInCore** post–Phase C. **phasePreCIngredientRoleMap** maps lines → structure/protein/base/coating/cooking_medium/flavor/garnish.
-- **Phase C**: **DISH_ANCHOR_OVERRIDE** (core overrules low confidence); validation retries for missing anchors, protein/oil stuck in optional, duplicates; artifact cleanup (**see blog**, note lines).
+- **Consensus engine** (**`lib/ingredientConsensus.ts`**): clusters Phase A lines for **LLM context** (Phase C substitution pass + full-ingredient fallback); **dish_anchors** in “lean CORE” hints. Scoring does **not** use consensus clusters — it uses **canonical entities** below.
+- **Ingredient canonicalization** (**`lib/ingredientCanonicalization.ts`**): after consensus formatting, **every Phase A line** is collapsed to **`CanonicalIngredientEntity`** (`canonical_name`, `variants[]` with line + source + confidence, **`ingredient_type`** heuristic). Cluster key = **`normalizeIngredientName`** on parsed name, else stem/cleaning key. **Single dedupe point** for ingredient identity. Log **`[ingredient-canonicalization] raw_count=… canonical_count=… clusters_formed=…`**.
+- **Dish anchors** (**`lib/dishAnchors.ts`**): per-family + name-based slots. **materializeAnchorsFromLines** maps abstract anchors to concrete Phase A lines; merged into **profile.essential_ingredients**. **Anchor scoring** uses **`canonical_name` only** (token match + **materializedMatchesCanonicalName**). **enforceAnchorsInCore** moves materialized anchor lines into core when missing. **phasePreCIngredientRoleMap** maps **raw lines** → roles (variants inherit best role for scoring).
+- **Phase C (signal path)**: **buildIngredientSignalsFromCanonical** → buckets; **postCanonicalIngredientCleanup** (**uniqueCoreByCanonicalName**, **stripOptionalOverlappingCore**, **cleanupIngredientArtifacts**). Retries: **rebucketSignals** (lower core threshold 70 → 65 → 58 → 52); last attempt **phaseCIngredients** LLM. Then **phaseCSubstitutionsOnly** for subs + core_rationale. Full-ingredient fallback prompt still uses **numbered** lines + consensus (not re-canonicalizing output).
 - **Role pass**: structure / flavor_base / richness / garnish / aroma / optional_enhancement — Phase D + optional **sort** for optional list on save (**`sortIngredientsByRole`**).
 - **Step Flow Canonicalization** (**`lib/stepFlowCanonicalization.ts`**, pre–Phase D): **`actionPhaseBucket`** (marinate / fry / prep / assemble / other); **`stripSourceScaffoldingLine`** on candidates; Jaccard clustering (tighter merge within the same phase). **`canonicalizeStepFlow`** → **`CanonicalizeResult`** (`plan`, `rawCandidateCount`, `clusterCount`, `secondaryFlowItemCount`, `usedLlmPlan`). **`ensureCanonicalPlanHasStages`** guarantees **≥3 stages** (playbook **`expected_flow`** or safe defaults) so Phase D always has a spine. Secondary methods → **`tip_candidates` / `warning_candidates` / `variant_candidates`** + **`discarded_or_secondary_flows`**. **`mergeRecipesIntelligent`** (chef + structured path): same **`canonicalizeStepFlow`** → **`finalizeStructuredSteps`** with **`canonicalSpine`**; if spine missing, **emergency 3-stage** spine + error log (never “raw steps only”). Unified log **`[synthesis-phased:canonical-flow]`**: `raw_step_candidates`, `cluster_count`, `dominant_flow_stage_count`, `secondary_flow_count`, `final_authored_step_count`, `canon_source`, `path=phased` \| `merge_intelligent_fallback`.
 - **Phase D**: **strict** prompt — finalized ingredients, single **playbook block** (playbook + **expected_flow** + failure points + roles), **CANONICAL_STEP_PLAN** only; no raw **`step_candidates`**, subs, or Phase A tips in the step prompt. Target **6–9** steps, max **12**; validation retries with explicit failure list. **Emergency steps:** if the Phase D LLM returns no usable steps after retries, build **`RecipeStep[]`** from **dominant_flow** stages (or a 3-step generic fallback) so **create/merge** can still succeed.
 - **Phase C recovery:** if **core** is empty after scoring but **optional** has **≥3** lines, promote top optional lines to **core** (logged), then continue.
-- **Finalize** (**`lib/recipeOutputCleanup.ts`**): structural step dedupe, collapse repeated fry/marinate/coat/mix/heat_oil, strip scaffolding, **trim long instructions**, **dedupe step warnings**, cap **12** steps (**`polishRecipeSteps`**).
+- **Finalize** (**`lib/recipeOutputCleanup.ts`** **`finalizeSynthesisPayload`**): **no ingredient list dedupe** (identity fixed at canonicalization). Optional list: **sortIngredientsByRole** when roles exist, **trimOptionalList** cap. **filterSubsQuality** on substitutions. Steps: **dedupeRecipeSteps**, **collapseRepeatedActionSteps**, **stripStepScaffolding**, dedupe again, trim warnings, cap **12**. Tips deduped/capped.
 - **`recipe_quality`**: **`dish_taxonomy`** (family id), **`cuisine`**, **synthesis_style**, **variant_notes**, **core_rationale**, **critical_tips**, **avoid_mistakes**, **`ingredient_roles`**, **`ingredient_signals`** (post–Phase C snapshots: name, **total_score**, bucket, anchor_match, frequency — for merge diffs). Create + extension pass **`synthesis_style`**.
 
 ### Synthesis entrypoints (`recipeSynthesis.ts`)
@@ -100,9 +101,9 @@ See **`docs/MERGE_REVIEW_FLOW.md`**.
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  recipeSynthesis.ts  →  synthesizeRecipePhased                     │
+│  recipeSynthesis.ts  →  synthesizeRecipePhased                       │
 │  (recipeSynthesisPhased.ts)                                        │
-│    A → B → playbook → C → roles → canonical flow → D → cleanup   │
+│    A→B→playbook→consensus→canonicalize→roleMap→C→roles→canon flow→D→finalize │
 └────────────────────────────┬────────────────────────────────────┘
                              │
               ┌──────────────┴──────────────┐
@@ -117,18 +118,27 @@ See **`docs/MERGE_REVIEW_FLOW.md`**.
 
 ### 2.2 Synthesis pipeline (order of operations)
 
-| Step | Module | What happens |
-|------|--------|--------------|
-| 1 | **`recipeSynthesisPhased`** | **Phase A:** per-source **`ingredient_candidates`**, **`step_candidates`**, **`tip_candidates`**. |
-| 2 | same | **Phase B:** dish profile (canonical name, **cuisine**, essentials, optionals). |
-| 3 | **`dynamicPlaybook.compileDynamicPlaybook`** | Chooses **dish family**, **`dish_anchors`** (mandatory core slots: protein, coating_starch, frying_oil, broth/noodles, dough/sauce/cheese, …), **expected_flow**, signature anchors, tools, timing, failure points. |
-| 4 | same | **Phase C:** **ingredient importance scores** (`IngredientSignal`: frequency, confidence, role, dish-anchor match → weighted **total_score**; anchors floor ≥85; core ≥70 / optional 30–69 / ignore &lt;30). LLM **substitutions-only**; retries rebucket thresholds. **`recipe_quality.ingredient_signals`**. Merge diffs: **`ingredient_score_notes`** + key improvements. **`playbookForPhaseC`**. |
-| 5 | same | **Ingredient roles** → **Step Flow Canonicalization** → Phase D. |
-| 6 | same | **Phase D:** canonical plan as hard input + **`playbookForPhaseD`**; band **6–9** (max 12); validation + retry. |
+| # | Module | What happens |
+|---|--------|--------------|
+| 1 | **`phaseAExtract`** | Per chunk: **`ingredient_candidates`**, **`step_candidates`**, **`tip_candidates`**. Empty ingredients → one repair JSON pass. |
+| 2 | **`phaseBDishProfile`** | **`canonical_dish_name`**, **`cuisine_style`**, **`essential_ingredients`**, **`optional_acceptable`** (+ name-inferred anchors). |
+| 3 | **`compileDynamicPlaybook`** | **dish_family**, **dish_anchors**, **expected_flow**, **signature_ingredients**, tools, timing, **failure_points**, **stepMin/stepMax** band. **`playbookForPhaseC` / `playbookForPhaseD`**. |
+| 4 | **`materializeAnchorsFromLines`** | Concrete lines from Phase A per anchor slot; **mergeEssentialLists** into profile essentials + signatures. |
+| 5 | **Numbered lines** | Flatten Phase A ingredients with **sourceIndex** + **sourceConf** (chunk confidence). |
+| 6 | **`buildIngredientConsensus`** + **`formatConsensusForPhaseC`** | Clusters + text block for later LLM calls (not the scoring input). |
+| 7 | **`canonicalizeIngredients`** | One entity per concept → Phase C scoring input. |
+| 8 | **`phasePreCIngredientRoleMap`** | LLM: each **raw candidate line** → role (protein, structure, base, coating, cooking_medium, flavor, garnish, …). |
+| 9 | **Phase C loop** (≤4 tries) | **buildIngredientSignalsFromCanonical** (attempt 0) or **rebucketSignals** (attempts 1+). **signalsToStructuredGroups** → **enforceAnchorsInCore** → **postCanonicalIngredientCleanup**. Empty core → lower **coreScoreMin** and retry. **phaseCFixReason** (essentials, anchor coverage, essentials in optional, protein/oil rules, duplicate core, core/optional overlap; attempt 0 skips “low-source-only in core” demotion) → if fail: lower threshold; on 4th fail → **phaseCIngredients** full LLM. On pass → **phaseCSubstitutionsOnly** (subs, **core_rationale**, **variant_notes**). |
+| 10 | **Post–C hardening** | If core empty and optional ≥3 → promote first optional lines to core. Again **enforceAnchorsInCore** + **postCanonicalIngredientCleanup**. Log essentials OK/missing. |
+| 11 | **`mergedStepBand`** | Target step count from core size + playbook. |
+| 12 | **`phaseIngredientRoles`** | Tags **final** core+optional names for Phase D block (**INGREDIENT_ROLES**). |
+| 13 | **`canonicalizeStepFlow`** + **`ensureCanonicalPlanHasStages`** | Step candidates → **dominant_flow** + tips/warnings/variants; ≥3 stages. |
+| 14 | **`phaseDAuthoring`** (≤4 tries) | Steps only from **CANONICAL_STEP_PLAN** + playbook; **injectFamilyMandatorySteps**; **collectStepValidationIssues** (core/optional mention, band, expected_flow). Emergency steps from canonical stages if LLM empty. |
+| 15 | **`finalizeSynthesisPayload`** | Steps polished; ingredients passed through (optional sort/trim); **`signalsToSnapshots`** → **`recipe_quality.ingredient_signals`**. |
 
-**Public entry:** **`recipeSynthesis.ts`** (`synthesizeRecipeFromCombinedRaw*`, `synthesizeRecipeFromVersions`) — all delegate to **`synthesizeRecipePhased`**.
+**Public entry:** **`recipeSynthesis.ts`** — **`synthesizeRecipePhased`**.
 
-**Fallback:** empty corpus → **`mergeRecipesIntelligent`** → same phased pipeline on structured **`ExtractedRecipe`** blobs (**`synthesizeRecipeFromVersions`**).
+**Fallback:** empty corpus → **`mergeRecipesIntelligent`** → **`synthesizeRecipeFromVersions`** or chef + **canonicalizeStepFlow** path (**`structuredSteps.ts`**).
 
 ### 2.3 Key files (quick map)
 
@@ -138,9 +148,10 @@ See **`docs/MERGE_REVIEW_FLOW.md`**.
 | Dynamic playbook | **`lib/dynamicPlaybook.ts`** (primitives, **`FAMILY_SKELETONS`**, **`CUISINE_LENSES`**) |
 | Facade + chunks | **`lib/recipeSynthesis.ts`** |
 | Merge / DB shape | **`lib/aiMerge.ts`**, **`lib/types.ts`** (`RecipeQualityMeta`, **`dish_taxonomy`** = stored **dish family** id) |
-| Ingredient scoring | **`lib/ingredientSignalScoring.ts`** (`IngredientSignal`, rebucket retries, merge diff notes) |
+| Ingredient canonicalization | **`lib/ingredientCanonicalization.ts`** (`CanonicalIngredientEntity`, cluster keys) |
+| Ingredient scoring | **`lib/ingredientSignalScoring.ts`** (`buildIngredientSignalsFromCanonical`, **rebucketSignals**, **signalsToStructuredGroups**, **signalsToSnapshots**) |
 | Merge quality | **`lib/mergeQualityScore.ts`** |
-| Anchors / consensus / cleanup | **`lib/dishAnchors.ts`**, **`lib/ingredientConsensus.ts`**, **`lib/recipeOutputCleanup.ts`** |
+| Anchors / consensus / finalize | **`lib/dishAnchors.ts`**, **`lib/ingredientConsensus.ts`**, **`lib/recipeOutputCleanup.ts`** |
 | Step flow (canonical) | **`lib/stepFlowCanonicalization.ts`**, **`lib/structuredSteps.ts`** (merge fallback + spine) |
 | Step quality (tests/asserts) | **`lib/stepRecipeQuality.ts`**, **`scripts/chef-synthesis-scenarios.ts`** |
 | Confidence | **`lib/sourceSynthesisConfidence.ts`** |
@@ -155,7 +166,7 @@ See **`docs/MERGE_REVIEW_FLOW.md`**.
 | Web | Next.js 14 (App Router), TypeScript, Tailwind |
 | DB | Supabase (Postgres) |
 | Synthesis | **`recipeSynthesisPhased.ts`**, **`dynamicPlaybook.ts`**, **`recipeSynthesis.ts`** |
-| Ingredients | **`ingredientNormalize.ts`** (Phase C dedupe) |
+| Ingredients | **`ingredientNormalize.ts`** (names/units), **`ingredientCanonicalization.ts`** (identity), **`ingredientParser.ts`** |
 | History | **`recipeSourceHistory.ts`** |
 | Diff | **`recipeDiff.ts`** (incl. **`materialRecipeDiffStructured`**), **`recipeDiffAi.ts`** |
 | Merge fallback | **`aiMerge.ts`**, **`structuredSteps.ts`** |
@@ -224,20 +235,27 @@ YouTube → `youtube`; TikTok / IG / FB / XHS → `reel_fallback`; else **`html_
 
 ### 7.1 Pipeline phases (`recipeSynthesisPhased.ts` + `dynamicPlaybook.ts`)
 
-| Stage | Output |
-|-------|--------|
-| **A** | Per source: **`ingredient_candidates`**, **`step_candidates`**, **`tip_candidates`** (no final recipe). |
-| **B** | **Dish profile:** canonical name, **cuisine**, **essentials**, acceptable optionals. |
-| **Dynamic playbook** | **`dish_family`**, **`expected_flow`**, **anchors**, **likely_tools**, **timing_expectations**, **failure_points**, **serving_style** — steers C and D. |
-| **C** | **`canonicalizeIngredients`** (one entity per concept: `canonical_name`, `variants`, `ingredient_type`) → **`buildIngredientSignalsFromCanonical`** (scores + **anchor_match** on `canonical_name` only) → buckets core ≥70 / optional 30–69. Substitutions LLM + validation retries (**rebucket**; last resort **`phaseCIngredients`**). Late ingredient dedupe only in canonicalization + **`postCanonicalIngredientCleanup`** (overlap strip). |
-| **Roles** | Per-ingredient roles for Phase D. |
-| **Canonical flow** | Cluster **`step_candidates`**; LLM or fallback **dominant_flow**; **`sanitizeCanonicalPlan`**; **`ensureCanonicalPlanHasStages`**. |
-| **D** | Strict JSON steps from canonical + playbook; validation + retry; **emergency steps** if LLM yields none. Family mandatory step injection when needed. |
-| **Finalize** | **`finalizeSynthesisPayload`**: ingredient dedupe, **`polishRecipeSteps`**. |
+| Stage | Output / behavior |
+|-------|-------------------|
+| **A** | Per source: **`ingredient_candidates`**, **`step_candidates`**, **`tip_candidates`**. Retry if all sources empty ingredients. |
+| **B** | **`DishProfile`**: name, cuisine, essentials, optionals. |
+| **Playbook** | **`compileDynamicPlaybook`**: family, **dish_anchors**, **expected_flow**, signatures, step band, failure points. Essentials += **materializedAnchors** + signatures. |
+| **Consensus** | **`buildIngredientConsensus`** rows + **`formatConsensusForPhaseC`** string → fed to **phaseCSubstitutionsOnly** / **phaseCIngredients** only. |
+| **Canonicalize** | **`canonicalizeIngredients(numbered)`** → entities; log **`[ingredient-canonicalization]`**. |
+| **Pre-C roles** | **`phasePreCIngredientRoleMap`**: raw line → role (drives **role_score** per variant). |
+| **C (signals)** | **`buildIngredientSignalsFromCanonical`**: frequency = distinct sources in **variants**; confidence = max per source; **anchor_match** on **canonical_name** vs anchor tokens + materialized lines; **total_score**; anchor_match ⇒ score ≥85. Buckets: core ≥**coreScoreMin** (70, then 65/58/52 on retry), optional [30,70), ignore &lt;30. |
+| **C (cleanup)** | **enforceAnchorsInCore** → **postCanonicalIngredientCleanup** (one core row per normalized name; drop optional rows whose name matches core; **cleanupIngredientArtifacts**). |
+| **C (LLM)** | **phaseCSubstitutionsOnly** on success path. **phaseCIngredients** on 4th failed validation (full judge on **numbered** + consensus). |
+| **Post-C** | Optional→core promotion if core empty. Second enforce + cleanup. |
+| **Roles (D)** | **`phaseIngredientRoles`**: final ingredient names → roles for **playbookBlock**. |
+| **Canonical flow** | **`canonicalizeStepFlow`** + **`ensureCanonicalPlanHasStages`** (≥3 stages). |
+| **D** | **`phaseDAuthoring`**: **canonicalStepPlanBlock** + playbook; **injectFamilyMandatorySteps**; validation retries; emergency steps. |
+| **Assemble** | Title, summary, time, tips, quality meta; **`ingredient_signals`** = **signalsToSnapshots(phaseC.signals)**. |
+| **Finalize** | **`finalizeSynthesisPayload`**: optional sort/trim/subs filter; step **polish** (no ingredient dedupe). |
 
-**Saved shape:** **`description`** = summary; **`mistakes`/`techniques`** → **`[]`** on new synth; substitutions **`{ ingredient, options, note? }`**; **`recipe_quality.dish_taxonomy`** = **dish family** id (e.g. `noodle_soup`).
+**Saved shape:** **`description`** = summary; **`mistakes`/`techniques`** → **`[]`** on new synth; substitutions **`{ ingredient, options, note? }`**; **`recipe_quality.dish_taxonomy`** = **dish family** id; **`ingredient_signals`** = post–C snapshots for merge diffs.
 
-**OpenAI calls (typical):** **Phase A, B, playbook compile, C, roles, D** — often **6+** JSON completions per run; retries add more.
+**OpenAI calls (typical):** A, B, playbook, **phasePreCIngredientRoleMap**, Phase C subs (or full C fallback), **phaseIngredientRoles**, canonical flow LLM, D — **8+** JSON calls; retries add more.
 
 ### 7.2 Fallback: `mergeRecipesIntelligent` (`lib/aiMerge.ts`)
 
@@ -303,7 +321,7 @@ Migrations: **`create_recipes`** → … → **`recipe_last_diff`**; **`source_e
 
 ## 12. Log prefixes
 
-`[extract]`, `[pipeline]`, `[OpenAI]`, **`[synthesis-phased:B]`**, **`[synthesis-phased:playbook]`**, **`[synthesis-phased:C]`**, **`[synthesis-phased:roles]`**, **`[synthesis-phased:canonical-flow]`**, **`[synthesis-phased:D]`**, **`[dynamic-playbook]`**, **`[recipeDiffAi]`**, **`[extract-from-extension]`**, **`[merge-decision]`**, `[merge]`.
+`[extract]`, `[pipeline]`, `[OpenAI]`, **`[ingredient-canonicalization]`** (`raw_count`, `canonical_count`, `clusters_formed`), **`[synthesis-phased:B]`**, **`[synthesis-phased:playbook]`**, **`[synthesis-phased:consensus]`**, **`[synthesis-phased:C]`**, **`[synthesis-phased:roles]`**, **`[synthesis-phased:canonical-flow]`**, **`[synthesis-phased:D]`**, **`[dynamic-playbook]`**, **`[recipeDiffAi]`**, **`[extract-from-extension]`**, **`[merge-decision]`**, `[merge]`.
 
 ---
 
@@ -315,7 +333,7 @@ Migrations: **`create_recipes`** → … → **`recipe_last_diff`**; **`source_e
 ingest (parallel)
       → historySources[] + historyRawTexts[]
       → synthesizeRecipeFromCombinedRawWithExtractions
-            A → B → playbook → C → roles → canonical flow → D → cleanup
+            A → B → playbook → consensus → canonicalize → roleMap → C → roles → canonical flow → D → finalize
       ├─► OK → insert (body + source_extractions + sources + raw_texts)
       └─► empty/fail → mergeRecipesIntelligent (4-phase on structured rows)
                       → needs_review if applicable; source_extractions may be null
@@ -330,17 +348,28 @@ Phase A ──► per-source candidate lists (ing / step / tip)
       ▼
 Phase B ──► dish profile (essentials, cuisine, …)
       ▼
-Dynamic playbook ──► family + expected_flow + anchors (from A candidates + confidence)
+Dynamic playbook ──► family + expected_flow + dish_anchors + materialize → merge essentials
       ▼
-Phase C ──► signals → core/optional; LLM subs only; enforce anchors; dedupe / retry
+Numbered ingredient lines (sourceIndex + sourceConf)
       ▼
-Roles ──► per-ingredient roles for authoring
+Consensus ──► clusters + formatted block (for Phase C LLM passes only)
       ▼
-Canonical flow ──► cluster step_candidates → ONE dominant_flow (+ demoted tips/variants)
+canonicalizeIngredients ──► one entity per concept (canonical_name, variants[], type)
+      ▼
+phasePreCIngredientRoleMap ──► role per raw line
+      ▼
+Phase C ──► buildIngredientSignalsFromCanonical → rebucket retries
+           → signalsToStructuredGroups → enforceAnchorsInCore
+           → postCanonicalIngredientCleanup → phaseCSubstitutionsOnly
+           (or phaseCIngredients fallback)
+      ▼
+phaseIngredientRoles ──► roles for Phase D playbook text
+      ▼
+Canonical flow ──► cluster step_candidates → dominant_flow (+ tips/warnings/variants)
       ▼
 Phase D ──► strict LLM steps OR emergency steps from canonical stages
       ▼
-finalizeSynthesisPayload (polishRecipeSteps)
+finalizeSynthesisPayload (optional sort/trim; polishRecipeSteps)
       ▼
 SynthesisDbPayload → DB
 ```
@@ -374,25 +403,47 @@ No client fetch for recipe JSON
 
 ---
 
-## 14. Ingredient importance scoring (reference)
+## 14. Ingredient pipeline (canonicalization + scoring)
 
-**Module:** **`lib/ingredientSignalScoring.ts`**.
+### 14.1 Canonicalization (`ingredientCanonicalization.ts`)
 
-Each clustered ingredient becomes an **`IngredientSignal`**: **frequency** (distinct sources), **confidence_levels** (per-source `high` / `medium_high` / `medium` / `low`), **role** (from **`phasePreCIngredientRoleMap`**: protein, structure, base, coating, cooking_medium, flavor, garnish, …), **anchor_match** (satisfies a **materialized** dish anchor or token match).
+| Piece | Rule |
+|-------|------|
+| **Input** | All Phase A ingredient lines with **sourceIndex** and **sourceConf**. |
+| **Cluster key** | **`normalizeIngredientName`** on coerced ingredient name; if short, **stemFromLine** (qty/unit stripped) or **cleaningKey**. |
+| **Entity** | **`canonical_name`** refined from first variant then best-display normalize; **`variants[]`** = every raw occurrence; **`ingredient_type`** = heuristic (protein, dairy, starch, liquid, sweetener, flavor, other). |
+| **Dedupe** | Only here + **postCanonicalIngredientCleanup** (core uniqueness + optional/core overlap). |
 
-| Component | Rule |
-|-----------|------|
+### 14.2 Scoring (`buildIngredientSignalsFromCanonical`)
+
+Each **canonical entity** → one **`IngredientSignal`** (**`name`** = canonical display).
+
+| Field | Source |
+|-------|--------|
+| **frequency** | Count of distinct **sourceIndex** in **variants**. |
+| **confidence_score** | Max **CONF_TO_SCORE** per contributing source. |
+| **role** | Best **roleScore** across variants via **lookupRole(line, roleByLine)**. |
+| **anchor_match** | **`anchorTokenMatch(canonical_name, anchorTokens)`** OR **`materializedMatchesCanonicalName(canonical_name, materialized)`** — never raw variant text alone. |
+| **best_line** | Variant line from highest-confidence source (display quantity). |
+
+| Component | Weight / rule |
+|-----------|----------------|
 | **frequency_score** | `min(100, frequency × 30)` |
-| **confidence_score** | max across sources: high 100, medium_high 80, medium 60, low 30 |
-| **role_score** | protein/structure 100; base/coating 85; cooking_medium 80; flavor 50; garnish 20 |
-| **anchor_score** | 100 if anchor match else 0 |
-| **total_score** | `0.3×freq + 0.2×conf + 0.25×role + 0.25×anchor` |
-| **Anchor override** | If **anchor_match**, **total_score** forced to **≥ 85** |
-| **Buckets** | core ≥70 · optional [30,70) · ignore &lt;30 |
+| **confidence_score** | high 100 … low 30 |
+| **role_score** | protein/structure 100; base/coating 85; cooking_medium 80; flavor/aroma/richness 50; garnish/optional_enhancement 20 |
+| **anchor_score** | 100 if match else 0 |
+| **total_score** | `0.3×freq + 0.2×conf + 0.25×role + 0.25×anchor`; if **anchor_match** ⇒ **≥ 85** |
+| **Buckets** | core ≥ **coreScoreMin** · optional [30, **coreScoreMin**) · ignore &lt;30 |
 
-**Phase C loop:** classify → **`enforceAnchorsInCore`** → normalize/dedupe → validation (**anchors in core**, no protein in optional, no dupes, no required structure in optional only). On failure, **rebucket** with a lower core threshold; on repeated failure, fallback to full Phase C LLM for ingredients.
+**signalsToStructuredGroups:** output **`ing.name`** = signal **canonical name**; dedupe keys by normalized canonical name; caps core 14 / optional 16.
 
-**Merge:** **`computeIngredientScoreDiffNotes`** compares stored **`ingredient_signals`** before/after (e.g. “X importance increased”, “Y added as optional”) for **`key_improvements`** and **`last_diff.ingredient_score_notes`**.
+### 14.3 Phase C validation (`phaseCFixReason`)
+
+Triggers retry (rebucket or **phaseCIngredients**): missing **profile.essential_ingredients**; **validateAnchorCoreCoverage**; essentials listed only in optional; protein in optional when anchor requires protein; frying oil only in optional; **duplicateNormalizedInCore**; same normalized name in core and optional; (when not skipped) core lines from **low**-confidence-only sources without essential/signature/anchor support.
+
+### 14.4 Merge diffs
+
+**`computeIngredientScoreDiffNotes`** compares **`ingredient_signals`** (name, **total_score**, bucket, **anchor_match**, frequency) before/after merge → **`key_improvements`** / **`last_diff.ingredient_score_notes`**.
 
 ---
 
@@ -411,6 +462,21 @@ Each clustered ingredient becomes an **`IngredientSignal`**: **frequency** (dist
 
 **Merge fallback** uses the same canonicalization so structured merge steps never ignore single-flow discipline.
 
+### 15.1 Phase D step validation (`collectStepValidationIssues`)
+
+Runs after **injectFamilyMandatorySteps** / clamp. Failure messages feed the next **phaseDAuthoring** retry.
+
+| Check | Intent |
+|-------|--------|
+| Step count | ≥5 and ≤12 (strict); band **min–max** from playbook also used upstream. |
+| **missingCoreInSteps** | Every **core** ingredient name must appear in step text. |
+| **validateStepsVsIngredients** | Optional/core usage consistency (e.g. no orphan mentions). |
+| **validateSingleFlowOrder** | One coherent sequence (no parallel “recipe A / recipe B”). |
+| **detectMultiRecipeMergeIssues** | Catches merged multi-recipe wording. |
+| Titles | No duplicate titles; no repeated action fingerprints in titles (e.g. multiple “Fry”). |
+| Instructions | No back-to-back duplicate bodies; no banned blog-style titles; not vague (“mix everything”); length/sentence caps. |
+| Time / duration | Each step needs **time_minutes** / **duration_minutes** or text cue (until…, N min, preheat, °F, etc.). |
+
 ---
 
 ## 16. Future-friendly
@@ -419,4 +485,4 @@ Auth / RLS, platform APIs, mobile share, grocery lists.
 
 ---
 
-*Last updated: **§15 Step flow canonicalization**; **Phase D emergency steps** + **ensureCanonicalPlanHasStages**; **Phase C optional→core** recovery; **merge_intelligent_fallback** canonical spine; **`stepRecipeQuality`** / **chef-synthesis-scenarios**; §14 ingredient scoring; **`RECIPE_WORKSPACE.md`** / **`MERGE_REVIEW_FLOW.md`**.*
+*Last updated: **§2.2 / §7.1 / §13 / §14** full synthesis + ingredient pipeline (**canonicalize → score → cleanup**); **finalizeSynthesisPayload** (no ingredient dedupe); **`[ingredient-canonicalization]`** logs; Phase D emergency steps; **`RECIPE_WORKSPACE.md`** / **`MERGE_REVIEW_FLOW.md`**.*
