@@ -10,6 +10,7 @@ import {
   chunksFromHistory,
   chunksFromVersions,
   type SourceChunk,
+  type SynthesisStyle,
 } from "./recipeSynthesisPhased";
 
 export type { SynthesisDbPayload } from "./types";
@@ -19,7 +20,15 @@ export {
   chunksFromHistory,
   chunksFromVersions,
 } from "./recipeSynthesisPhased";
-export type { PerSourceExtraction } from "./recipeSynthesisPhased";
+export type { PerSourceExtraction, SynthesisStyle } from "./recipeSynthesisPhased";
+
+export type SynthesisOptions = {
+  sources?: string[];
+  raw_texts?: string[];
+  sourceConfidences?: import("./sourceSynthesisConfidence").SourceConfidence[];
+  platforms?: string[];
+  synthesisStyle?: SynthesisStyle;
+};
 
 /**
  * Full synthesis from joined raw corpus or parallel source chunks.
@@ -28,7 +37,7 @@ export async function synthesizeRecipeFromCombinedRaw(
   combinedText: string,
   openaiApiKey: string,
   fallbackTitle = "Recipe",
-  options?: { sources?: string[]; raw_texts?: string[] }
+  options?: SynthesisOptions
 ): Promise<SynthesisDbPayload | null> {
   let chunks: SourceChunk[];
   if (
@@ -37,7 +46,9 @@ export async function synthesizeRecipeFromCombinedRaw(
   ) {
     chunks = chunksFromHistory(
       options.sources?.map((s) => String(s)) ?? [],
-      options.raw_texts.map((t) => String(t))
+      options.raw_texts.map((t) => String(t)),
+      options.sourceConfidences,
+      options.platforms
     );
   } else {
     const parts = combinedText
@@ -52,7 +63,9 @@ export async function synthesizeRecipeFromCombinedRaw(
   if (chunks.length === 0 && combinedText.trim()) {
     chunks = [{ label: "Source 1", text: combinedText.trim().slice(0, 120_000) }];
   }
-  const r = await synthesizeRecipePhased(chunks, openaiApiKey, fallbackTitle);
+  const r = await synthesizeRecipePhased(chunks, openaiApiKey, fallbackTitle, {
+    synthesisStyle: options?.synthesisStyle,
+  });
   return r?.payload ?? null;
 }
 
@@ -61,7 +74,7 @@ export async function synthesizeRecipeFromCombinedRawWithExtractions(
   combinedText: string,
   openaiApiKey: string,
   fallbackTitle = "Recipe",
-  options?: { sources?: string[]; raw_texts?: string[] }
+  options?: SynthesisOptions
 ) {
   let chunks: SourceChunk[];
   if (
@@ -70,7 +83,9 @@ export async function synthesizeRecipeFromCombinedRawWithExtractions(
   ) {
     chunks = chunksFromHistory(
       options.sources?.map((s) => String(s)) ?? [],
-      options.raw_texts.map((t) => String(t))
+      options.raw_texts.map((t) => String(t)),
+      options.sourceConfidences,
+      options.platforms
     );
   } else {
     const parts = combinedText
@@ -85,7 +100,9 @@ export async function synthesizeRecipeFromCombinedRawWithExtractions(
   if (chunks.length === 0 && combinedText.trim()) {
     chunks = [{ label: "Source 1", text: combinedText.trim().slice(0, 120_000) }];
   }
-  return synthesizeRecipePhased(chunks, openaiApiKey, fallbackTitle);
+  return synthesizeRecipePhased(chunks, openaiApiKey, fallbackTitle, {
+    synthesisStyle: options?.synthesisStyle,
+  });
 }
 
 export async function synthesizeRecipeFromVersions(

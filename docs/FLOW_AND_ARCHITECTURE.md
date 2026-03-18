@@ -23,6 +23,15 @@ This document describes how the app works end-to-end, with emphasis on **four-ph
 
 **Legacy:** rows with only **`raw_text`** → **`hydrateRecipeSourceHistory`** backfills one chunk and aligns **`sources`** from **`source_urls`**.
 
+### Chef-quality layer (synthesis)
+
+- **Dish family** (dynamic playbook, after Phase B): **`lib/dynamicPlaybook.ts`** composes **`dish_family`** + flow from **universal primitives**, **family skeletons** (e.g. `noodle_soup`, `pizza_flatbread`, `braise_stew`), **cuisine lens**, and **anchors** from Phase A candidates + confidence. Stored in **`recipe_quality.dish_taxonomy`** as the family id (UI label). Phase C/D prompts include **`playbookForPhaseC` / `playbookForPhaseD`**.
+- **Source confidence** per chunk: `high` / `medium_high` / `medium` / `low` (blog/JSON-LD vs reel/DOM). Low-confidence-only lines must not become **core** unless dish-essential or corroborated.
+- **Phase C**: cook **style** (`authentic` | `easier_at_home` | `lighter` | `rich_indulgent`), **core rationale**, **variant_notes** (1–3 if sources diverge).
+- **Role pass**: structure / flavor_base / richness / garnish / aroma / optional_enhancement — informs Phase D.
+- **Phase D**: playbook-ordered steps; **critical_tips** + **avoid_mistakes**; validation retry so **every core** appears in some step.
+- **`recipe_quality`** JSON on row: taxonomy, style, variants, rationale, roles, critical/avoid. **`POST /api/recipes/create`** accepts **`synthesis_style`**; extension accepts **`synthesis_style`**.
+
 ### Synthesis entrypoints (`recipeSynthesis.ts`)
 
 | Function | Use |
@@ -31,7 +40,7 @@ This document describes how the app works end-to-end, with emphasis on **four-ph
 | **`synthesizeRecipeFromCombinedRawWithExtractions`** | Returns **`payload`** + **`source_extractions`** for DB (create + extension merge). |
 | **`synthesizeRecipeFromVersions`** | Same 4-phase pipeline on **synthetic chunks** from structured **`ExtractedRecipe`** rows (**`mergeRecipesIntelligent`** fallback). |
 
-Full re-synthesis uses **all** **`raw_texts[]`** (not incremental). Phases: **§6.1**. On successful corpus save, **`source_extractions`** is written; on structured-merge fallback after an empty corpus result, it may be **cleared** (`null`).
+Full re-synthesis uses **all** **`raw_texts[]`** (not incremental). Pipeline: **§7.1**. On successful corpus save, **`source_extractions`** is written; on structured-merge fallback after an empty corpus result, it may be **cleared** (`null`).
 
 ### Web create (`POST /api/recipes/create`)
 
@@ -62,13 +71,73 @@ Full re-synthesis uses **all** **`raw_texts[]`** (not incremental). Phases: **§
 
 ---
 
-## 2. Tech stack (reference)
+## 2. Architecture overview
+
+### 2.1 Layers
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│  Web (/create, /recipe, /dashboard)  ·  Chrome extension (MV3)   │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ POST create / extract-from-extension
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Next.js API routes  →  ingest pipeline  →  SourceChunk[]       │
+│  (labels + raw_texts + per-chunk confidence)                     │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  recipeSynthesis.ts  →  synthesizeRecipePhased                     │
+│  (recipeSynthesisPhased.ts)                                        │
+│    Phase A → B → Dynamic playbook → Phase C → ingredient roles   │
+│    → Phase D → SynthesisDbPayload                                 │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+┌─────────────────────────┐   ┌─────────────────────────────────┐
+│  OpenAI (gpt-4o-mini)   │   │  Supabase: recipes row             │
+│  JSON completions       │   │  body + sources + raw_texts +    │
+│                         │   │  source_extractions + recipe_quality│
+└─────────────────────────┘   └─────────────────────────────────┘
+```
+
+### 2.2 Synthesis pipeline (order of operations)
+
+| Step | Module | What happens |
+|------|--------|--------------|
+| 1 | **`recipeSynthesisPhased`** | **Phase A:** per-source **`ingredient_candidates`**, **`step_candidates`**, **`tip_candidates`**. |
+| 2 | same | **Phase B:** dish profile (canonical name, **cuisine**, essentials, optionals). |
+| 3 | **`dynamicPlaybook.compileDynamicPlaybook`** | Chooses **dish family**, composes **expected_flow**, **anchors** (signature ingredients/techniques), tools, timing, failure points, serving — from **primitives + family skeleton + cuisine lens + Phase A signal**. |
+| 4 | same | **Phase C:** core / optional / substitutions; prompt includes **`playbookForPhaseC`**. Retries for essentials / dedupe. |
+| 5 | same | **Ingredient roles** pass → Phase D. |
+| 6 | same | **Phase D:** steps + summary + tips; prompt includes **`playbookForPhaseD`**; step count band from family **min/max** (clamped). Validation retry. |
+
+**Public entry:** **`recipeSynthesis.ts`** (`synthesizeRecipeFromCombinedRaw*`, `synthesizeRecipeFromVersions`) — all delegate to **`synthesizeRecipePhased`**.
+
+**Fallback:** empty corpus → **`mergeRecipesIntelligent`** → same phased pipeline on structured **`ExtractedRecipe`** blobs (**`synthesizeRecipeFromVersions`**).
+
+### 2.3 Key files (quick map)
+
+| Area | Files |
+|------|--------|
+| Phased synthesis | **`lib/recipeSynthesisPhased.ts`** |
+| Dynamic playbook | **`lib/dynamicPlaybook.ts`** (primitives, **`FAMILY_SKELETONS`**, **`CUISINE_LENSES`**) |
+| Facade + chunks | **`lib/recipeSynthesis.ts`** |
+| Merge / DB shape | **`lib/aiMerge.ts`**, **`lib/types.ts`** (`RecipeQualityMeta`, **`dish_taxonomy`** = stored **dish family** id) |
+| Confidence | **`lib/sourceSynthesisConfidence.ts`** |
+| Ingest | **`lib/sourcePipeline.ts`**, **`websiteExtract.ts`**, **`aiExtractor.ts`** |
+
+---
+
+## 3. Tech stack (reference)
 
 | Layer | Technology |
 |-------|------------|
 | Web | Next.js 14 (App Router), TypeScript, Tailwind |
 | DB | Supabase (Postgres) |
-| Synthesis | **`recipeSynthesisPhased.ts`** (A–D); **`recipeSynthesis.ts`** |
+| Synthesis | **`recipeSynthesisPhased.ts`**, **`dynamicPlaybook.ts`**, **`recipeSynthesis.ts`** |
 | Ingredients | **`ingredientNormalize.ts`** (Phase C dedupe) |
 | History | **`recipeSourceHistory.ts`** |
 | Diff | **`recipeDiff.ts`**, **`recipeDiffAi.ts`** |
@@ -80,17 +149,17 @@ Full re-synthesis uses **all** **`raw_texts[]`** (not incremental). Phases: **§
 
 ---
 
-## 3. User-facing entry points
+## 4. User-facing entry points
 
-### 3.1 Create (`/create`)
+### 4.1 Create (`/create`)
 
 **`POST /api/recipes/create`** — multi-source ingest → phased corpus save → draft or **`mergeRecipesIntelligent`** fallback.
 
-### 3.2 Dashboard (`/dashboard`)
+### 4.2 Dashboard (`/dashboard`)
 
 List by **`updated_at`**; **`DELETE /api/recipes/[id]`**.
 
-### 3.3 Recipe (`/recipe/[id]`)
+### 4.3 Recipe (`/recipe/[id]`)
 
 **Layout:** **`max-w-[720px]`**, **`space-y-6`**, cards + soft shadows.
 
@@ -104,26 +173,27 @@ List by **`updated_at`**; **`DELETE /api/recipes/[id]`**.
 | **Substitutions** | **`ingredient` → `options`**, optional **`note`**. |
 | **Start cooking** | Scroll to **`#recipe-steps`**. |
 | **Steps** | Number, title, time/tools, instructions, **`warnings`**. |
-| **Tips** | Flat list if non-empty (no mistakes/techniques sections in UI). |
+| **Tips** | Flat list if non-empty. |
+| **Quality** | **`recipe_quality`**: dish-family pill (**`dish_taxonomy`** = family id), optional **synthesis style**, **Must know** / **Avoid**, **Variants**; per-ingredient **core rationale** (“why core”) where present. **`ingredient_roles`** stored for Phase D / future UI. |
 | **History** | “Updated from *N* sources” + **`versions[]`**; collapsible source URLs. |
 
 **Data freshness:** **`unstable_noStore()`** in recipe loader so merges from the extension show the latest row. Extension opens **`/recipe/{id}?updated=…&cb=…`** to avoid stale tab cache.
 
 **No extra client API calls** for scaling.
 
-### 3.4 Extension
+### 4.4 Extension
 
 Picker → **Add this page** → **`POST /api/extract-from-extension`**. ~5k DOM chars. **View recipe** uses cache-bust query params.
 
 ---
 
-## 4. Link classification (`classifyLink`)
+## 5. Link classification (`classifyLink`)
 
 YouTube → `youtube`; TikTok / IG / FB / XHS → `reel_fallback`; else **`html_parse`**.
 
 ---
 
-## 5. Per-source extraction (ingest, not synthesis Phase A)
+## 6. Per-source extraction (ingest, not synthesis Phase A)
 
 **`ExtractedRecipe`**, **`StructuredIngredient`**. Blogs: JSON-LD **`Recipe`** may skip OpenAI. See **`websiteExtract.ts`**, **`sourcePipeline.ts`**, **`aiExtractor.ts`**.
 
@@ -131,32 +201,34 @@ YouTube → `youtube`; TikTok / IG / FB / XHS → `reel_fallback`; else **`html_
 
 ---
 
-## 6. Corpus synthesis & fallbacks
+## 7. Corpus synthesis & fallbacks
 
-### 6.1 Four phases (`recipeSynthesisPhased.ts`)
+### 7.1 Pipeline phases (`recipeSynthesisPhased.ts` + `dynamicPlaybook.ts`)
 
-| Phase | Output |
+| Stage | Output |
 |-------|--------|
-| **A** | Per source: **`ingredient_candidates`**, **`step_candidates`**, **`tip_candidates`** (no final recipe decisions). |
-| **B** | **Dish profile:** canonical name, cuisine, **essentials**, acceptable optionals. |
-| **C** | **Core / optional / substitutions** (+ dedupe); retries if essentials missing or misplaced. |
-| **D** | **Steps** (banded count by complexity), **`summary`**, **`tips`** (≤6), **`servings`**, step **`warnings`**. Retry if steps don’t align with ingredient names. |
+| **A** | Per source: **`ingredient_candidates`**, **`step_candidates`**, **`tip_candidates`** (no final recipe). |
+| **B** | **Dish profile:** canonical name, **cuisine**, **essentials**, acceptable optionals. |
+| **Dynamic playbook** | **`dish_family`**, **`expected_flow`**, **anchors**, **likely_tools**, **timing_expectations**, **failure_points**, **serving_style** — steers C and D. |
+| **C** | **Core / optional / substitutions**; playbook text in prompt; retries if essentials missing or misplaced. |
+| **Roles** | Per-ingredient roles for Phase D. |
+| **D** | **Steps** (count within family band), **`summary`**, **`tips`**, **`critical_tips`**, **`avoid_mistakes`**, **`servings`**, step **`warnings`**. Retry if cores missing from steps or validation fails. |
 
-**Saved shape:** **`description`** = summary; **`mistakes`/`techniques`** → **`[]`** on new synth; substitutions **`{ ingredient, options, note? }`**.
+**Saved shape:** **`description`** = summary; **`mistakes`/`techniques`** → **`[]`** on new synth; substitutions **`{ ingredient, options, note? }`**; **`recipe_quality.dish_taxonomy`** = **dish family** id (e.g. `noodle_soup`).
 
-**Calls:** ~**4–6** OpenAI JSON completions per full run (plus retries).
+**OpenAI calls (typical):** **Phase A, B, playbook compile, C, roles, D** — often **6+** JSON completions per run; retries add more.
 
-### 6.2 Fallback: `mergeRecipesIntelligent`
+### 7.2 Fallback: `mergeRecipesIntelligent`
 
 When corpus phased synthesis is **null** or yields an empty body: build chunks from **`ExtractedRecipeWithConfidence[]`**, run the **same 4-phase** via **`synthesizeRecipeFromVersions`**.
 
-### 6.3 `mergedOutputToDbRow` / `synthesisPayloadToMerged`
+### 7.3 `mergedOutputToDbRow` / `synthesisPayloadToMerged`
 
 Map **`SynthesisDbPayload`** → DB columns (**`aiMerge.ts`**).
 
 ---
 
-## 7. Extension merge (sequence)
+## 8. Extension merge (sequence)
 
 1. **`mergeSources`** → **`source_urls`**, **`source_platforms`**.
 2. Append **`sources`**, **`raw_texts`**.
@@ -166,7 +238,7 @@ Map **`SynthesisDbPayload`** → DB columns (**`aiMerge.ts`**).
 
 ---
 
-## 8. API routes (summary)
+## 9. API routes (summary)
 
 | Route | Purpose |
 |-------|---------|
@@ -179,7 +251,7 @@ Map **`SynthesisDbPayload`** → DB columns (**`aiMerge.ts`**).
 
 ---
 
-## 9. Database (`recipes`)
+## 10. Database (`recipes`)
 
 | Column | Role |
 |--------|------|
@@ -193,19 +265,19 @@ Migrations: chain from **`create_recipes`** through **`recipe_last_diff`**; add 
 
 ---
 
-## 10. Environment
+## 11. Environment
 
 `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, **`OPENAI_API_KEY`**.
 
 ---
 
-## 11. Log prefixes
+## 12. Log prefixes
 
-`[extract]`, `[pipeline]`, `[OpenAI]`, `[synthesis-phased]`, **`[recipeDiffAi]`**, **`[extract-from-extension]`**, `[merge]`.
+`[extract]`, `[pipeline]`, `[OpenAI]`, **`[synthesis-phased]`**, **`[dynamic-playbook]`** (family, lens, anchors, playbook summary; fallback on AI failure), **`[recipeDiffAi]`**, **`[extract-from-extension]`**, `[merge]`.
 
 ---
 
-## 12. Diagrams
+## 13. Diagrams
 
 ### Web create
 
@@ -213,7 +285,7 @@ Migrations: chain from **`create_recipes`** through **`recipe_last_diff`**; add 
 ingest (parallel)
       → historySources[] + historyRawTexts[]
       → synthesizeRecipeFromCombinedRawWithExtractions
-            Phase A → B → C → D
+            A → B → dynamic playbook → C → roles → D
       ├─► OK → insert (body + source_extractions + sources + raw_texts)
       └─► empty/fail → mergeRecipesIntelligent (4-phase on structured rows)
                       → needs_review if applicable; source_extractions may be null
@@ -228,9 +300,13 @@ Phase A ──► per-source candidate lists (ing / step / tip)
       ▼
 Phase B ──► dish profile (essentials, cuisine, …)
       ▼
-Phase C ──► core, optional, substitutions (+ dedupe / retries)
+Dynamic playbook ──► family + expected_flow + anchors (from A candidates + confidence)
       ▼
-Phase D ──► steps + summary + tips + servings (+ step validation retry)
+Phase C ──► core, optional, substitutions (+ playbook context; dedupe / retries)
+      ▼
+Roles ──► per-ingredient roles for authoring
+      ▼
+Phase D ──► steps + summary + tips + critical/avoid (+ step validation retry)
       ▼
 SynthesisDbPayload → DB
 ```
@@ -257,10 +333,10 @@ No client fetch for recipe JSON
 
 ---
 
-## 13. Future-friendly
+## 14. Future-friendly
 
 Auth / RLS, platform APIs, mobile share, grocery lists.
 
 ---
 
-*Last updated: **four-phase** `recipeSynthesisPhased` (A–D); **`source_extractions`** + **`WithExtractions`** on create/extension; **recipe page** hierarchy, **`warnings`**, tips-only extras, **`noStore`** + extension cache-bust; **diff** summaries capped and noise-filtered; diagrams aligned.*
+*Last updated: **§2 architecture** (layers + synthesis pipeline table); **A → B → dynamic playbook → C → roles → D**; **`dynamicPlaybook.ts`**; **`recipe_quality`** / dish-family UI; **`[dynamic-playbook]`** logs; create diagram and phase table aligned.*

@@ -11,6 +11,7 @@ import type {
 } from "@/lib/types";
 import {
   dedupeIngredientList,
+  normalizeIngredientName,
 } from "@/lib/ingredientNormalize";
 import {
   formatQuantity,
@@ -32,14 +33,22 @@ type RecipeViewProps = {
   onDuplicate?: () => void;
 };
 
+function formatTaxonomyLabel(t: string): string {
+  return String(t || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function IngredientCardRow({
   ing,
   scaled,
   showScaled,
+  coreRationale,
 }: {
   ing: StructuredIngredient;
   scaled: ScaledIngredient;
   showScaled: boolean;
+  coreRationale?: string;
 }) {
   const canScale =
     scaled.scaledQuantity != null && Boolean(ing.unit) && ing.quantity != null;
@@ -60,9 +69,27 @@ function IngredientCardRow({
           scaledQuantity: scaled.scaledQuantity,
         });
 
+  const [whyOpen, setWhyOpen] = useState(false);
+
   return (
     <div className="border-b border-neutral-100 py-3.5 text-[15px] leading-snug last:border-0">
-      <span className="font-medium text-neutral-900">{line}</span>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <span className="font-medium text-neutral-900">{line}</span>
+        {coreRationale ? (
+          <button
+            type="button"
+            onClick={() => setWhyOpen((v) => !v)}
+            className="shrink-0 text-xs font-medium text-emerald-700 hover:text-emerald-900"
+          >
+            {whyOpen ? "Hide why" : "Why essential?"}
+          </button>
+        ) : null}
+      </div>
+      {whyOpen && coreRationale ? (
+        <p className="mt-2 rounded-lg bg-emerald-50/80 px-3 py-2 text-sm leading-relaxed text-emerald-950">
+          {coreRationale}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -90,6 +117,15 @@ export function RecipeView({
     : [];
   const sourceUrls = Array.isArray(recipe.source_urls) ? recipe.source_urls : [];
   const versions = recipe.versions ?? [];
+  const quality = recipe.recipe_quality;
+
+  const rationaleByName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of quality?.core_rationale ?? []) {
+      m.set(normalizeIngredientName(r.name), r.why);
+    }
+    return m;
+  }, [quality?.core_rationale]);
 
   const core = useMemo(
     () => dedupeIngredientList(coreRaw),
@@ -217,7 +253,71 @@ export function RecipeView({
             {nSources} source{nSources === 1 ? "" : "s"}
           </span>
         </div>
+        {quality?.dish_taxonomy && quality.dish_taxonomy !== "other" ? (
+          <div className="flex flex-wrap gap-2 pt-1">
+            <span className="rounded-full bg-neutral-100 px-3 py-1 text-xs font-medium text-neutral-700">
+              {formatTaxonomyLabel(quality.dish_taxonomy)}
+            </span>
+            {quality.synthesis_style &&
+            quality.synthesis_style !== "authentic" ? (
+              <span className="rounded-full border border-neutral-200 px-3 py-1 text-xs text-neutral-600">
+                Style:{" "}
+                {quality.synthesis_style === "easier_at_home"
+                  ? "Easier at home"
+                  : quality.synthesis_style === "lighter"
+                    ? "Lighter"
+                    : "Rich / indulgent"}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </header>
+
+      {(quality?.critical_tips?.length || quality?.avoid_mistakes?.length) ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {quality.critical_tips && quality.critical_tips.length > 0 ? (
+            <section className="rounded-xl border border-blue-200/80 bg-blue-50/60 px-4 py-4 shadow-sm">
+              <h2 className="text-xs font-bold uppercase tracking-wide text-blue-900">
+                Must know
+              </h2>
+              <ul className="mt-2 space-y-2 text-sm text-blue-950">
+                {quality.critical_tips.map((t, i) => (
+                  <li key={i} className="leading-snug">
+                    {t}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+          {quality.avoid_mistakes && quality.avoid_mistakes.length > 0 ? (
+            <section className="rounded-xl border border-red-200/80 bg-red-50/50 px-4 py-4 shadow-sm">
+              <h2 className="text-xs font-bold uppercase tracking-wide text-red-900">
+                Avoid
+              </h2>
+              <ul className="mt-2 space-y-2 text-sm text-red-950">
+                {quality.avoid_mistakes.map((t, i) => (
+                  <li key={i} className="leading-snug">
+                    {t}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+        </div>
+      ) : null}
+
+      {quality?.variant_notes && quality.variant_notes.length > 0 ? (
+        <section className="rounded-xl border border-violet-200/70 bg-violet-50/40 px-4 py-4">
+          <h2 className="text-xs font-bold uppercase tracking-wide text-violet-900">
+            Variants from your sources
+          </h2>
+          <ul className="mt-2 space-y-2 text-sm text-violet-950">
+            {quality.variant_notes.map((t, i) => (
+              <li key={i}>{t}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {/* Servings */}
       {ingTotal > 0 && (
@@ -303,6 +403,9 @@ export function RecipeView({
                     ing={item}
                     scaled={scaledCore[i]!}
                     showScaled={showScaled}
+                    coreRationale={rationaleByName.get(
+                      normalizeIngredientName(item.name)
+                    )}
                   />
                 ))}
               </div>

@@ -15,8 +15,29 @@ import {
   normalizeAndDedupeGroups,
   normalizeIngredientName,
 } from "./ingredientNormalize";
+import {
+  compileDynamicPlaybook,
+  playbookForPhaseC,
+  playbookForPhaseD,
+} from "./dynamicPlaybook";
+import {
+  type SourceConfidence,
+  confidenceFromPlatformRaw,
+} from "./sourceSynthesisConfidence";
+import type { RecipeQualityMeta } from "./types";
 
-export type SourceChunk = { label: string; text: string };
+export type SourceChunk = {
+  label: string;
+  text: string;
+  /** Default medium if omitted */
+  confidence?: SourceConfidence;
+};
+
+export type SynthesisStyle =
+  | "authentic"
+  | "easier_at_home"
+  | "lighter"
+  | "rich_indulgent";
 
 export type PerSourceExtraction = {
   source_label: string;
@@ -221,7 +242,7 @@ async function phaseBDishProfile(
   const uniq = Array.from(
     new Set(allIngredients.map((x) => x.trim()).filter(Boolean))
   ).slice(0, 180);
-  const system = `You are a culinary expert. Given raw ingredient mentions from one or more sources about the SAME dish, infer the dish identity.
+  const system = `You are a culinary expert. Given raw ingredient mentions from one or more sources about the SAME dish, infer identity and essentials.
 
 Return STRICT JSON:
 {
@@ -231,9 +252,9 @@ Return STRICT JSON:
   "optional_acceptable": string[]
 }
 
-essential_ingredients: items that define this dish (e.g. tiramisu → ladyfingers, mascarpone, coffee, cocoa, sugar). Short noun phrases.
-optional_acceptable: common optional add-ons (not defining).
-Use knowledge of the dish — not vote counting.`;
+essential_ingredients: defining items. optional_acceptable: add-ons.
+cuisine_style: e.g. Vietnamese, Italian, Japanese, Thai, regional Chinese, etc.
+Use dish knowledge — not vote counting.`;
 
   const user = `Working title hint: "${fallbackTitle}"\n\nIngredient mentions (noisy list):\n${uniq.map((x, i) => `${i + 1}. ${x}`).join("\n")}`;
 
@@ -276,39 +297,53 @@ function essentialCoverage(
   return { ok, missing };
 }
 
-/** PHASE C — ingredients + substitutions */
+const STYLE_GUIDE: Record<SynthesisStyle, string> = {
+  authentic: "Traditional ingredients and methods.",
+  easier_at_home: "Supermarket staples, forgiving techniques.",
+  lighter: "Lighter fats/sugar where possible; keep identity.",
+  rich_indulgent: "Full-flavor, generous, indulgent.",
+};
+
 async function phaseCIngredients(
   openai: InstanceType<typeof import("openai").default>,
   profile: DishProfile,
-  numberedIngredients: { id: number; line: string }[],
+  numbered: {
+    id: number;
+    line: string;
+    sourceIndex: number;
+    sourceConf: SourceConfidence;
+  }[],
+  synthesisStyle: SynthesisStyle,
+  playbookC: string,
   fixHint?: string
 ): Promise<{
   core: StructuredIngredient[];
   optional: StructuredIngredient[];
   subs: RecipeSubstitutionEntry[];
+  core_rationale: { name: string; why: string }[];
+  variant_notes: string[];
 } | null> {
-  const system = `You are the ingredient decision engine for one recipe.
+  const system = `Ingredient decision engine. Candidates tagged [id] (S# CONFIDENCE) text.
+CONFIDENCE: high=structured; medium_high=long text; medium=image; low=reel/weak.
+RULE: Items ONLY from low-confidence sources are NOT core unless dish-essential OR corroborated by medium+ sources.
 
-Using the DISH PROFILE and numbered CANDIDATE lines from sources:
-- Choose core: required for an authentic dish (dish knowledge, NOT frequency).
-- Choose optional: garnishes, nice-to-haves — must NOT duplicate essentials in core.
-- substitutions: groups of interchangeable items (ingredient = main, options = alternates).
-- Omit noise/wrong lines (do not list them in core/optional).
+STYLE: ${synthesisStyle} — ${STYLE_GUIDE[synthesisStyle]}
 
 Return STRICT JSON:
 {
   "core": [{ "name": string, "quantity": number | null, "unit": string }],
-  "optional": [{ "name": string, "quantity": number | null, "unit": string }],
-  "substitutions": [{ "ingredient": string, "options": string[], "note": string }]
+  "optional": [...],
+  "substitutions": [{ "ingredient": string, "options": string[], "note": string }],
+  "core_rationale": [{ "name": string, "why": string }],
+  "variant_notes": string[]
 }
+variant_notes: 0–3 lines if sources diverge meaningfully; else [].
+Max 14 core, 8 optional. Essentials from profile in core.`;
 
-Rules:
-- Max 14 core, max 8 optional.
-- No duplicate normalized ingredient names between core and optional (one line per ingredient).
-- Every essential_ingredient from the profile must appear in core (merge duplicates into one line with best quantity).
-- quantity null = unmeasured / to taste.`;
-
-  const user = `DISH PROFILE:\n${JSON.stringify(profile, null, 2)}\n\nNUMBERED INGREDIENT CANDIDATES:\n${numberedIngredients.map((x) => `[${x.id}] ${x.line}`).join("\n")}${fixHint ? `\n\nFIX REQUIRED:\n${fixHint}` : ""}`;
+  const lines = numbered.map(
+    (x) => `[${x.id}] (S${x.sourceIndex} ${x.sourceConf}) ${x.line}`
+  );
+  const user = `${playbookC}\n\n---\n\nPROFILE:\n${JSON.stringify(profile, null, 2)}\n\n${lines.join("\n")}${fixHint ? `\n\nFIX:\n${fixHint}` : ""}`;
 
   const p = await chatJson(openai, system, user);
   if (!p) return null;
@@ -326,6 +361,25 @@ Rules:
   let core = parseIng(p.core).slice(0, 14);
   let optional = parseIng(p.optional).slice(0, 8);
   const subs = substitutionsFromPhaseC(p.substitutions);
+  const core_rationale: { name: string; why: string }[] = Array.isArray(
+    p.core_rationale
+  )
+    ? (p.core_rationale as unknown[])
+        .map((x) => {
+          if (!x || typeof x !== "object") return null;
+          const o = x as Record<string, unknown>;
+          const name = String(o.name ?? "").trim();
+          const why = String(o.why ?? "").trim();
+          return name && why ? { name, why: why.slice(0, 220) } : null;
+        })
+        .filter(Boolean) as { name: string; why: string }[]
+    : [];
+  const variant_notes = Array.isArray(p.variant_notes)
+    ? p.variant_notes
+        .map((x) => String(x).trim())
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
 
   const merged = normalizeAndDedupeGroups({ core, optional });
   core = merged.core;
@@ -342,7 +396,52 @@ Rules:
   }
   optional = dedupeOpt;
 
-  return { core, optional, subs };
+  return { core, optional, subs, core_rationale, variant_notes };
+}
+
+async function phaseIngredientRoles(
+  openai: InstanceType<typeof import("openai").default>,
+  core: StructuredIngredient[],
+  optional: StructuredIngredient[]
+): Promise<{ name: string; role: string }[]> {
+  const list = [...core, ...optional].map((i) => i.name).filter(Boolean);
+  if (!list.length) return [];
+  const p = await chatJson(
+    openai,
+    `Tag each ingredient with ONE role: structure | flavor_base | richness | garnish | aroma | optional_enhancement
+Return STRICT JSON: { "roles": [{ "name": string, "role": string }] }`,
+    list.join("\n")
+  );
+  if (!p || !Array.isArray(p.roles)) return [];
+  return (p.roles as unknown[])
+    .map((x) => {
+      if (!x || typeof x !== "object") return null;
+      const o = x as Record<string, unknown>;
+      const name = String(o.name ?? "").trim();
+      const role = String(o.role ?? "").trim();
+      return name ? { name, role } : null;
+    })
+    .filter(Boolean) as { name: string; role: string }[];
+}
+
+function missingCoreInSteps(
+  core: StructuredIngredient[],
+  steps: RecipeStep[]
+): string[] {
+  const blob = steps
+    .map((s) => `${s.title} ${s.instructions}`.toLowerCase())
+    .join(" ");
+  const miss: string[] = [];
+  for (const c of core) {
+    const n = c.name.toLowerCase().trim();
+    if (n.length < 2) continue;
+    const toks = n.split(/\s+/).filter((w) => w.replace(/\W/g, "").length >= 3);
+    const hit =
+      blob.includes(n) ||
+      toks.some((t) => t.length >= 4 && blob.includes(t.replace(/\W/g, "")));
+    if (!hit) miss.push(c.name);
+  }
+  return miss;
 }
 
 const STEP_STOP = new Set(
@@ -398,68 +497,71 @@ function stepBand(coreCount: number): { min: number; max: number; label: string 
   return { min: 10, max: 14, label: "complex" };
 }
 
-/** PHASE D — steps + tips after ingredients locked */
 async function phaseDAuthoring(
   openai: InstanceType<typeof import("openai").default>,
   profile: DishProfile,
+  playbookD: string,
+  dishFamilyLabel: string,
   core: StructuredIngredient[],
   optional: StructuredIngredient[],
+  rolesLines: string,
   stepCandidates: string[],
   tipCandidates: string[],
-  band: { min: number; max: number; label: string },
+  synthesisStyle: SynthesisStyle,
+  band: { min: number; max: number },
   fixHint?: string
 ): Promise<{
   summary: string;
   steps: RecipeStep[];
   tips: string[];
   servings_base: number;
+  critical_tips: string[];
+  avoid_mistakes: string[];
 } | null> {
   const ingList = [
     ...core.map((c) => `${c.quantity ?? "—"} ${c.unit} ${c.name}`.trim()),
     ...optional.map((c) => `optional: ${c.quantity ?? "—"} ${c.unit} ${c.name}`.trim()),
   ].join("\n");
+  const coreNames = core.map((c) => c.name).join(", ");
 
-  const system = `You write the FINAL recipe steps. Ingredients are LOCKED — do not add new ones.
+  const system = `You write ONE clean, chef-curated recipe — not a merge dump.
+
+${playbookD}
 
 Return STRICT JSON:
 {
   "summary": string,
   "servings": number,
-  "steps": [
-    {
-      "title": string,
-      "instructions": string,
-      "time_minutes": number,
-      "tools": string[],
-      "warnings": string[]
-    }
-  ],
-  "tips": string[]
+  "steps": [{ "title": string, "instructions": string, "time_minutes": number, "tools": string[], "warnings": string[] }],
+  "tips": string[],
+  "critical_tips": string[],
+  "avoid_mistakes": string[]
 }
 
-Rules:
-- summary: 1–2 sentences for the cook.
-- steps: ${band.min} to ${band.max} steps for a ${band.label} recipe. Group flow: prep → cook/mix → assemble → chill/rest → serve.
-- Do NOT split tiny actions into separate steps. Each step is substantial.
-- instructions: concise, actionable, one paragraph max.
-- Reference ONLY ingredients from the locked list (and water/salt/pepper/oil if already listed).
-- time_minutes: realistic per step (0 if instant).
-- tools: only when relevant (max 6 per step).
-- warnings: inline cautions when useful (max 2 per step); else [].
-- tips: max 6 short lines; omit fluff.
-- servings: realistic yield (integer 1–24).`;
+RULES:
+- Steps: ${band.min}–${band.max} substantial steps. Follow EXPECTED FLOW order above.
+- EVERY core ingredient MUST be named in at least one step's instructions: cores are [${coreNames}].
+- STYLE ${synthesisStyle}: ${STYLE_GUIDE[synthesisStyle]}
+- warnings: step-level cautions (max 2/step).
+- critical_tips: max 3 must-know pro tips (different from generic tips).
+- avoid_mistakes: max 3 common failures to avoid.
+- tips: max 4 helpful lines (non-critical).
+- Only listed ingredients + water/salt/oil if in list.`;
 
-  const user = `DISH: ${profile.canonical_dish_name} (${profile.cuisine_style})
+  const user = `DISH: ${profile.canonical_dish_name} (${profile.cuisine_style}) [family: ${dishFamilyLabel}]
 
-LOCKED INGREDIENTS:
+INGREDIENT ROLES:
+${rolesLines || "(none)"}
+
+INGREDIENTS:
 ${ingList}
 
-STEP CANDIDATES (distill into ${band.min}–${band.max} logical steps):
+STEPS FROM SOURCES:
 ${stepCandidates.slice(0, 80).map((s, i) => `${i + 1}. ${s}`).join("\n")}
 
-TIP CANDIDATES (pick best, max 6):
+TIPS FROM SOURCES:
 ${tipCandidates.slice(0, 40).map((s, i) => `${i + 1}. ${s}`).join("\n")}
-${fixHint ? `\n\nCORRECTION:\n${fixHint}` : ""}`;
+${fixHint ? `\n\nFIX:\n${fixHint}` : ""}`;
 
   const p = await chatJson(openai, system, user);
   if (!p) return null;
@@ -478,10 +580,23 @@ ${fixHint ? `\n\nCORRECTION:\n${fixHint}` : ""}`;
     }
   }
   const tips = Array.isArray(p.tips)
-    ? p.tips.map((t) => String(t).trim()).filter(Boolean).slice(0, 6)
+    ? p.tips.map((t) => String(t).trim()).filter(Boolean).slice(0, 4)
+    : [];
+  const critical_tips = Array.isArray(p.critical_tips)
+    ? p.critical_tips.map((t) => String(t).trim()).filter(Boolean).slice(0, 3)
+    : [];
+  const avoid_mistakes = Array.isArray(p.avoid_mistakes)
+    ? p.avoid_mistakes.map((t) => String(t).trim()).filter(Boolean).slice(0, 3)
     : [];
 
-  return { summary, steps, tips, servings_base };
+  return {
+    summary,
+    steps,
+    tips,
+    servings_base,
+    critical_tips,
+    avoid_mistakes,
+  };
 }
 
 function clampSteps(steps: RecipeStep[], max: number): RecipeStep[] {
@@ -522,7 +637,8 @@ function clampSteps(steps: RecipeStep[], max: number): RecipeStep[] {
 export async function synthesizeRecipePhased(
   chunks: SourceChunk[],
   openaiApiKey: string,
-  fallbackTitle: string
+  fallbackTitle: string,
+  opts?: { synthesisStyle?: SynthesisStyle }
 ): Promise<{
   payload: SynthesisDbPayload;
   source_extractions: PerSourceExtraction[];
@@ -575,38 +691,92 @@ export async function synthesizeRecipePhased(
       optional_acceptable: [],
     };
 
-  const numbered: { id: number; line: string }[] = [];
-  let id = 0;
-  for (const line of allIng) {
-    const t = line.trim();
-    if (t) numbered.push({ id: id++, line: t });
+  const stepCandidatesAll = extractions.flatMap((e) => e.step_candidates);
+  const tipCandidatesAll = extractions.flatMap((e) => e.tip_candidates);
+  const confidenceSummary = nonEmpty
+    .map((c) => `${c.label}: ${c.confidence ?? "medium"}`)
+    .join(" | ");
+
+  const dynamicPb = await compileDynamicPlaybook(openaiApiKey, {
+    dishName: profile.canonical_dish_name,
+    cuisine: profile.cuisine_style,
+    ingredientCandidates: allIng,
+    stepCandidates: stepCandidatesAll,
+    tipCandidates: tipCandidatesAll,
+    confidenceSummary,
+  });
+  const playbookC = playbookForPhaseC(dynamicPb);
+  const playbookD = playbookForPhaseD(dynamicPb);
+  const band = {
+    min: Math.max(3, dynamicPb.stepMin),
+    max: Math.min(16, dynamicPb.stepMax),
+  };
+
+  console.log(
+    `[synthesis-phased] dynamic_playbook family=${dynamicPb.dish_family} anchors_ing=${dynamicPb.signature_ingredients.length} anchors_tech=${dynamicPb.signature_techniques.length}`
+  );
+
+  const style: SynthesisStyle =
+    opts?.synthesisStyle &&
+    ["authentic", "easier_at_home", "lighter", "rich_indulgent"].includes(
+      opts.synthesisStyle
+    )
+      ? opts.synthesisStyle
+      : "authentic";
+
+  const numbered: {
+    id: number;
+    line: string;
+    sourceIndex: number;
+    sourceConf: SourceConfidence;
+  }[] = [];
+  let nid = 0;
+  for (let si = 0; si < extractions.length; si++) {
+    const conf: SourceConfidence =
+      nonEmpty[si]?.confidence ?? "medium";
+    for (const line of extractions[si]!.ingredient_candidates) {
+      const t = line.trim();
+      if (t) numbered.push({ id: nid++, line: t, sourceIndex: si, sourceConf: conf });
+    }
   }
 
-  let phaseC = await phaseCIngredients(openai, profile, numbered);
+  let phaseC = await phaseCIngredients(openai, profile, numbered, style, playbookC);
   if (!phaseC || phaseC.core.length === 0) {
     const retry = await phaseCIngredients(
       openai,
       profile,
       numbered,
-      "You must output non-empty core with quantities where possible. Merge duplicate lines."
+      style,
+      playbookC,
+      "Non-empty core required with quantities where possible."
     );
     if (retry) phaseC = retry;
   }
   if (!phaseC || phaseC.core.length === 0) return null;
 
-  let { core, optional, subs } = phaseC;
+  let {
+    core,
+    optional,
+    subs,
+    core_rationale,
+    variant_notes,
+  } = phaseC;
   const cov = essentialCoverage(core, profile.essential_ingredients);
   if (!cov.ok && profile.essential_ingredients.length >= 2) {
     const retry = await phaseCIngredients(
       openai,
       profile,
       numbered,
-      `Missing essentials in core: ${cov.missing.join(", ")}. Add them.`
+      style,
+      playbookC,
+      `Missing essentials in core: ${cov.missing.join(", ")}.`
     );
     if (retry && retry.core.length > 0) {
       core = retry.core;
       optional = retry.optional;
       subs = retry.subs;
+      core_rationale = retry.core_rationale;
+      variant_notes = retry.variant_notes;
     }
   }
 
@@ -622,26 +792,33 @@ export async function synthesizeRecipePhased(
       openai,
       profile,
       numbered,
-      `Move these from optional to core (they are essential): ${optDup.map((o) => o.name).join(", ")}`
+      style,
+      playbookC,
+      `Move to core: ${optDup.map((o) => o.name).join(", ")}`
     );
     if (retry) {
       core = retry.core;
       optional = retry.optional;
       subs = retry.subs;
+      core_rationale = retry.core_rationale;
+      variant_notes = retry.variant_notes;
     }
   }
 
-  const stepCandidates = extractions.flatMap((e) => e.step_candidates);
-  const tipCandidates = extractions.flatMap((e) => e.tip_candidates);
-  const band = stepBand(core.length);
+  const roleRows = await phaseIngredientRoles(openai, core, optional);
+  const rolesLines = roleRows.map((r) => `${r.name}: ${r.role}`).join("\n");
 
   let authored = await phaseDAuthoring(
     openai,
     profile,
+    playbookD,
+    dynamicPb.dish_family,
     core,
     optional,
-    stepCandidates,
-    tipCandidates,
+    rolesLines,
+    stepCandidatesAll,
+    tipCandidatesAll,
+    style,
     band
   );
   if (!authored || authored.steps.length === 0) return null;
@@ -650,24 +827,34 @@ export async function synthesizeRecipePhased(
   let tips = authored.tips;
   let summary = authored.summary;
   let servings_base = authored.servings_base;
+  let critical_tips = authored.critical_tips;
+  let avoid_mistakes = authored.avoid_mistakes;
 
+  let miss = missingCoreInSteps(core, steps);
   let v = validateStepsVsIngredients(steps, core, optional);
-  if (v.length > 0 || steps.length > band.max || steps.length < Math.min(3, band.min)) {
+  if (
+    miss.length > 0 ||
+    v.length > 0 ||
+    steps.length > band.max ||
+    steps.length < Math.min(3, band.min)
+  ) {
     const retryD = await phaseDAuthoring(
       openai,
       profile,
+      playbookD,
+      dynamicPb.dish_family,
       core,
       optional,
-      stepCandidates,
-      tipCandidates,
+      rolesLines,
+      stepCandidatesAll,
+      tipCandidatesAll,
+      style,
       band,
       [
+        miss.length ? `Use these core items in steps: ${miss.join(", ")}` : "",
         ...v,
-        steps.length > band.max
-          ? `Use at most ${band.max} steps.`
-          : steps.length < band.min
-            ? `Use at least ${band.min} logical steps.`
-            : "",
+        steps.length > band.max ? `Max ${band.max} steps.` : "",
+        steps.length < band.min ? `At least ${band.min} steps.` : "",
       ]
         .filter(Boolean)
         .join(" ")
@@ -677,33 +864,52 @@ export async function synthesizeRecipePhased(
       tips = retryD.tips.length ? retryD.tips : tips;
       summary = retryD.summary || summary;
       servings_base = retryD.servings_base || servings_base;
+      critical_tips = retryD.critical_tips.length
+        ? retryD.critical_tips
+        : critical_tips;
+      avoid_mistakes = retryD.avoid_mistakes.length
+        ? retryD.avoid_mistakes
+        : avoid_mistakes;
     }
   }
 
   if (steps.length > band.max) steps = clampSteps(steps, band.max);
-  if (steps.length < band.min && steps.length > 0) {
-    /* keep short recipes if model returned fewer meaningful steps */
-  }
 
-  v = validateStepsVsIngredients(steps, core, optional);
-  if (v.length > 0) {
-    console.warn("[synthesis-phased] step validation soft fail:", v.join(" | "));
+  miss = missingCoreInSteps(core, steps);
+  if (miss.length > 0) {
+    console.warn("[synthesis-phased] core not all in steps:", miss.join(", "));
   }
 
   const title = profile.canonical_dish_name || fallbackTitle;
+  const mergedTips = [
+    ...critical_tips,
+    ...variant_notes,
+    ...tips,
+  ].filter(Boolean).slice(0, 12);
+
+  const recipe_quality: RecipeQualityMeta = {
+    dish_taxonomy: dynamicPb.dish_family,
+    synthesis_style: style,
+    variant_notes,
+    core_rationale: core_rationale.slice(0, 16),
+    critical_tips,
+    avoid_mistakes,
+    ingredient_roles: roleRows,
+  };
 
   const payload: SynthesisDbPayload = {
     title,
     description: summary,
     ingredients: { core, optional },
     steps,
-    tips,
+    tips: mergedTips,
     substitutionsDetailed: subs,
-    mistakes: [],
+    mistakes: avoid_mistakes,
     techniques: [],
     estimated_time: "—",
     servings: servingsDisplayLabel(Math.max(1, servings_base)),
     servings_base: Math.max(1, servings_base),
+    recipe_quality,
   };
 
   return { payload, source_extractions: extractions };
@@ -712,17 +918,32 @@ export async function synthesizeRecipePhased(
 /** Build chunks from merged raw_texts + sources */
 export function chunksFromHistory(
   sources: string[],
-  raw_texts: string[]
+  raw_texts: string[],
+  confidences?: SourceConfidence[],
+  platforms?: string[]
 ): SourceChunk[] {
   const n = Math.max(sources.length, raw_texts.length);
   const out: SourceChunk[] = [];
   for (let i = 0; i < n; i++) {
+    const text = String(raw_texts[i] ?? "");
+    const conf =
+      confidences?.[i] ??
+      (platforms?.[i]
+        ? confidenceFromPlatformRaw(platforms[i]!, text.length)
+        : undefined);
     out.push({
       label: String(sources[i] ?? `Source ${i + 1}`),
-      text: String(raw_texts[i] ?? ""),
+      text,
+      confidence: conf ?? "medium",
     });
   }
   return out.filter((c) => c.text.trim().length > 0);
+}
+
+function versionToSourceConf(c: string): SourceConfidence {
+  if (c === "high") return "high";
+  if (c === "low") return "low";
+  return "medium_high";
 }
 
 /** Versions path: synthetic chunks from structured recipes */
@@ -738,6 +959,7 @@ export function chunksFromVersions(
     return {
       label: s.title || `Version ${i + 1}`,
       text: `INGREDIENTS:\n${ing || "(none)"}\n\nSTEPS:\n${st || "(none)"}`,
+      confidence: versionToSourceConf(s.confidence),
     };
   });
 }

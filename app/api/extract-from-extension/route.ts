@@ -78,6 +78,7 @@ function fullRecipeFromRow(row: Record<string, unknown>) {
     updated_at: row.updated_at ?? null,
     last_diff: r.last_diff ?? null,
     versions: r.versions ?? [],
+    recipe_quality: r.recipe_quality ?? null,
   };
 }
 
@@ -89,6 +90,7 @@ export async function POST(req: NextRequest) {
       platform?: string;
       recipeId?: string | null;
       recipe_name?: string;
+      synthesis_style?: string;
     };
     const rawText =
       typeof body?.raw_text === "string" ? body.raw_text.trim() : "";
@@ -102,6 +104,7 @@ export async function POST(req: NextRequest) {
         : null;
     const recipeNameOpt =
       typeof body?.recipe_name === "string" ? body.recipe_name.trim() : "";
+    const synthesisStyle = body?.synthesis_style?.trim();
 
     const openaiKey = process.env.OPENAI_API_KEY?.trim() || "";
     const supabase = createServerClient();
@@ -140,6 +143,9 @@ export async function POST(req: NextRequest) {
       const nextRawTexts = [...rawHist, rawText];
       const sourcesAfter = nextRawTexts.length;
       const combinedText = nextRawTexts.join(RAW_TEXT_JOINER).slice(0, 500_000);
+      const nextPlatforms = nextSources.map((_, i) =>
+        String(source_platforms[i] ?? plat)
+      );
 
       console.log(
         `[extract-from-extension] merge recipeId=${recipeId} sourcesBefore=${sourcesBefore} sourcesAfter=${sourcesAfter} combinedLen=${combinedText.length}`
@@ -160,7 +166,17 @@ export async function POST(req: NextRequest) {
             combinedText,
             openaiKey,
             fallbackTitle,
-            { sources: nextSources, raw_texts: nextRawTexts }
+            {
+              sources: nextSources,
+              raw_texts: nextRawTexts,
+              platforms: nextPlatforms,
+              synthesisStyle: synthesisStyle as
+                | "authentic"
+                | "easier_at_home"
+                | "lighter"
+                | "rich_indulgent"
+                | undefined,
+            }
           );
           const synth = phased?.payload;
           sourceExtractions = phased?.source_extractions
@@ -214,6 +230,7 @@ export async function POST(req: NextRequest) {
           estimated_time: dbPayload.estimated_time,
           servings: dbPayload.servings,
           servings_base: dbPayload.servings_base,
+          recipe_quality: dbPayload.recipe_quality ?? null,
         };
         const structured = diffRecipes(previousRecipe, nextRecipe);
         const aiPart =
@@ -265,6 +282,7 @@ export async function POST(req: NextRequest) {
             raw_texts: nextRawTexts,
             raw_text: combinedText || null,
             source_extractions: sourceExtractions,
+            recipe_quality: dbPayload.recipe_quality,
             needs_user_input,
             needs_review: false,
             last_diff,
@@ -371,7 +389,17 @@ export async function POST(req: NextRequest) {
         rawText,
         openaiKey,
         recipeNameOpt || "Recipe",
-        { sources, raw_texts }
+        {
+          sources,
+          raw_texts,
+          platforms: [plat],
+          synthesisStyle: synthesisStyle as
+            | "authentic"
+            | "easier_at_home"
+            | "lighter"
+            | "rich_indulgent"
+            | undefined,
+        }
       );
       const synthNew = phasedNew?.payload;
       if (synthNew) {
@@ -410,6 +438,7 @@ export async function POST(req: NextRequest) {
                 },
               ]
             : null,
+          recipe_quality: dbPayload.recipe_quality,
           needs_user_input: needs,
           needs_review: false,
           updated_at: new Date().toISOString(),

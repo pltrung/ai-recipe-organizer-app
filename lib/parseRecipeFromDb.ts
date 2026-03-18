@@ -3,6 +3,7 @@ import type {
   RecipeDiffVersionEntry,
   RecipeIngredientsGrouped,
   RecipeLastDiff,
+  RecipeQualityMeta,
   RecipeStep,
   RecipeSubstitutionEntry,
 } from "./types";
@@ -218,6 +219,51 @@ function parseVersions(raw: unknown): RecipeDiffVersionEntry[] {
   return out;
 }
 
+function parseRecipeQuality(raw: unknown): RecipeQualityMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const variant_notes = Array.isArray(o.variant_notes)
+    ? o.variant_notes.map(String).filter(Boolean)
+    : [];
+  const core_rationale = Array.isArray(o.core_rationale)
+    ? (o.core_rationale as unknown[])
+        .map((x) => {
+          if (!x || typeof x !== "object") return null;
+          const r = x as Record<string, unknown>;
+          const name = String(r.name ?? "").trim();
+          const why = String(r.why ?? "").trim();
+          return name && why ? { name, why } : null;
+        })
+        .filter(Boolean)
+    : [];
+  const critical_tips = Array.isArray(o.critical_tips)
+    ? o.critical_tips.map(String).filter(Boolean)
+    : [];
+  const avoid_mistakes = Array.isArray(o.avoid_mistakes)
+    ? o.avoid_mistakes.map(String).filter(Boolean)
+    : [];
+  const ingredient_roles = Array.isArray(o.ingredient_roles)
+    ? (o.ingredient_roles as unknown[])
+        .map((x) => {
+          if (!x || typeof x !== "object") return null;
+          const r = x as Record<string, unknown>;
+          const name = String(r.name ?? "").trim();
+          const role = String(r.role ?? "").trim();
+          return name ? { name, role } : null;
+        })
+        .filter(Boolean)
+    : [];
+  return {
+    dish_taxonomy: String(o.dish_taxonomy ?? "other"),
+    synthesis_style: String(o.synthesis_style ?? "authentic"),
+    variant_notes,
+    core_rationale: core_rationale as { name: string; why: string }[],
+    critical_tips,
+    avoid_mistakes,
+    ingredient_roles: ingredient_roles as { name: string; role: string }[],
+  };
+}
+
 export function recipeFromDbRow(data: Record<string, unknown>): Recipe {
   const ing = parseIngredientsFromDb(data.ingredients);
   const sbRaw = data.servings_base;
@@ -254,5 +300,6 @@ export function recipeFromDbRow(data: Record<string, unknown>): Recipe {
     versions: parseVersions(data.versions),
     mistakes: parseMistakesFromDb(data.mistakes),
     techniques: parseTechniquesFromDb(data.techniques),
+    recipe_quality: parseRecipeQuality(data.recipe_quality),
   };
 }

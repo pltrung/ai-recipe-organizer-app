@@ -67,6 +67,17 @@ export type RecipeSubstitutionEntry = {
   alternatives?: string[];
 };
 
+/** Chef-quality metadata from phased synthesis */
+export type RecipeQualityMeta = {
+  dish_taxonomy: string;
+  synthesis_style: string;
+  variant_notes: string[];
+  core_rationale: { name: string; why: string }[];
+  critical_tips: string[];
+  avoid_mistakes: string[];
+  ingredient_roles?: { name: string; role: string }[];
+};
+
 /** Payload from synthesis before DB merge */
 export type SynthesisDbPayload = {
   title: string;
@@ -80,6 +91,7 @@ export type SynthesisDbPayload = {
   estimated_time: string;
   servings: string;
   servings_base: number;
+  recipe_quality: RecipeQualityMeta | null;
 };
 
 export interface ExtractedRecipe {
@@ -140,6 +152,8 @@ export interface Recipe {
   mistakes: string[];
   /** Named techniques worth highlighting */
   techniques: string[];
+  /** Dish taxonomy, variants, core rationale, critical tips (synthesis v2) */
+  recipe_quality?: RecipeQualityMeta | null;
 }
 
 export type RecipeDiffStructured = {

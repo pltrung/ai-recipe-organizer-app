@@ -36,6 +36,7 @@ export type MergedRecipeOutput = {
   estimated_time: string;
   servings: string;
   servings_base: number;
+  recipe_quality?: import("./types").RecipeQualityMeta | null;
 };
 
 const CHEF_SYSTEM = `You are a professional chef combining multiple recipes into the best possible version.
@@ -280,6 +281,7 @@ export async function mergeRecipesIntelligent(
         estimated_time: ordered[0].estimated_time || "—",
         servings: synth.servings,
         servings_base: synth.servings_base,
+        recipe_quality: synth.recipe_quality ?? null,
       };
     }
   }
@@ -329,6 +331,7 @@ export async function mergeRecipesIntelligent(
         estimated_time: ordered[0].estimated_time || "—",
         servings: servingsDisplayLabel(servings_base_fallback),
         servings_base: servings_base_fallback,
+        recipe_quality: null,
       };
     }
   }
@@ -368,6 +371,7 @@ export async function mergeRecipesIntelligent(
     estimated_time: ordered[0].estimated_time || "—",
     servings: servingsDisplayLabel(servings_base_fallback),
     servings_base: servings_base_fallback,
+    recipe_quality: null,
   };
 }
 
@@ -425,6 +429,7 @@ export function synthesisPayloadToMerged(p: SynthesisDbPayload): MergedRecipeOut
     estimated_time: p.estimated_time,
     servings: p.servings,
     servings_base: p.servings_base,
+    recipe_quality: p.recipe_quality ?? null,
   };
 }
 
@@ -442,5 +447,6 @@ export function mergedOutputToDbRow(m: MergedRecipeOutput) {
     estimated_time: m.estimated_time,
     servings: m.servings,
     servings_base: m.servings_base,
+    recipe_quality: m.recipe_quality ?? null,
   };
 }

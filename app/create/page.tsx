@@ -25,6 +25,9 @@ export default function CreatePage() {
   const [urls, setUrls] = useState<string[]>([""]);
   const [images, setImages] = useState<string[]>([]);
   const [dishName, setDishName] = useState("");
+  const [recipeStyle, setRecipeStyle] = useState<
+    "authentic" | "easier_at_home" | "lighter" | "rich_indulgent"
+  >("authentic");
   const [loading, setLoading] = useState(false);
   const [loadingStep, setLoadingStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +121,7 @@ export default function CreatePage() {
           urls: validUrls,
           images: images.length > 0 ? images : undefined,
           dish_name: dishName || undefined,
+          synthesis_style: recipeStyle,
         }),
       });
       clearInterval(stepTimer);
@@ -491,6 +495,29 @@ export default function CreatePage() {
             placeholder="e.g. Bún Bò Huế"
             className="mt-1 w-full rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-200"
           />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-neutral-600">
+            Recipe style
+          </label>
+          <select
+            value={recipeStyle}
+            onChange={(e) =>
+              setRecipeStyle(
+                e.target.value as typeof recipeStyle
+              )
+            }
+            className="mt-1 w-full rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 text-sm text-neutral-900 focus:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-200"
+          >
+            <option value="authentic">Authentic / traditional</option>
+            <option value="easier_at_home">Easier at home</option>
+            <option value="lighter">Lighter</option>
+            <option value="rich_indulgent">Rich / indulgent</option>
+          </select>
+          <p className="mt-1 text-xs text-neutral-500">
+            Guides how the AI curates ingredients and steps.
+          </p>
         </div>
       </div>
 

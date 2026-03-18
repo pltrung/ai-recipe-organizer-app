@@ -16,6 +16,11 @@ import {
   finalizeStructuredSteps,
   fallbackStructuredSteps,
 } from "@/lib/structuredSteps";
+import {
+  confidenceFromWebsiteIngest,
+  confidenceFromImageIngest,
+} from "@/lib/sourceSynthesisConfidence";
+import type { SourceConfidence } from "@/lib/sourceSynthesisConfidence";
 
 function recipeToFallbackRaw(r: ExtractedRecipe): string {
   const ing = r.ingredients
@@ -36,12 +41,14 @@ export async function POST(req: NextRequest) {
       images?: string[];
       user_id?: string;
       dish_name?: string;
+      synthesis_style?: string;
       fallback?: { title: string; ingredients: string[]; steps: string[] };
     };
     const urls = body?.urls ?? [];
     const images = body?.images ?? [];
     const fallback = body?.fallback;
     const dishName = body?.dish_name?.trim();
+    const synthesisStyle = body?.synthesis_style?.trim();
 
     if (
       fallback &&
@@ -130,6 +137,7 @@ export async function POST(req: NextRequest) {
     const rawTextParts: string[] = [];
     const historySources: string[] = [];
     const historyRawTexts: string[] = [];
+    const historyConfidences: SourceConfidence[] = [];
     const sourceUrls: string[] = [];
     const sourcePlatforms: string[] = [];
     let hasReelInput = false;
@@ -159,11 +167,17 @@ export async function POST(req: NextRequest) {
             u;
           historySources.push(u);
           historyRawTexts.push(raw);
+          historyConfidences.push(
+            confidenceFromWebsiteIngest(u, outcome.report, raw.length)
+          );
           rawTextParts.push(`--- ${u} ---\n${raw}`);
         } else if (outcome.rawForDb?.trim()) {
           const raw = outcome.rawForDb.trim();
           historySources.push(u);
           historyRawTexts.push(raw);
+          historyConfidences.push(
+            confidenceFromWebsiteIngest(u, outcome.report, raw.length)
+          );
           rawTextParts.push(`--- ${u} ---\n${raw}`);
         }
       } else {
@@ -209,11 +223,13 @@ export async function POST(req: NextRequest) {
             label;
           historySources.push(label);
           historyRawTexts.push(raw);
+          historyConfidences.push(confidenceFromImageIngest(raw.length));
           rawTextParts.push(`--- ${label} ---\n${raw}`);
         } else if (outcome.rawForDb?.trim()) {
           const raw = outcome.rawForDb.trim();
           historySources.push(label);
           historyRawTexts.push(raw);
+          historyConfidences.push(confidenceFromImageIngest(raw.length));
           rawTextParts.push(`--- ${label} ---\n${raw}`);
         }
       } else {
@@ -236,6 +252,23 @@ export async function POST(req: NextRequest) {
     const totalCount = sourceReports.length;
 
     const combinedText = historyRawTexts.join(RAW_TEXT_JOINER);
+    while (historyConfidences.length < historySources.length) {
+      historyConfidences.push("medium");
+    }
+    const synthOpts = {
+      sources: historySources,
+      raw_texts: historyRawTexts,
+      sourceConfidences: historyConfidences,
+      platforms: historySources.map(
+        (_, i) => sourcePlatforms[i] ?? "website"
+      ),
+      synthesisStyle: synthesisStyle as
+        | "authentic"
+        | "easier_at_home"
+        | "lighter"
+        | "rich_indulgent"
+        | undefined,
+    };
 
     if (successfulRecipes.length === 0) {
       if (historyRawTexts.length > 0) {
@@ -243,7 +276,7 @@ export async function POST(req: NextRequest) {
           combinedText,
           openaiKey,
           dishName || "Recipe",
-          { sources: historySources, raw_texts: historyRawTexts }
+          synthOpts
         );
         const synthOnly = phasedOnly?.payload;
         if (synthOnly) {
@@ -290,6 +323,7 @@ export async function POST(req: NextRequest) {
                 sources: historySources,
                 raw_texts: historyRawTexts,
                 source_extractions: srcEx,
+                recipe_quality: dbPayload.recipe_quality,
                 needs_review: false,
                 needs_user_input: false,
                 updated_at: new Date().toISOString(),
@@ -381,7 +415,7 @@ export async function POST(req: NextRequest) {
       combinedText,
       openaiKey,
       dishName || successfulRecipes[0]?.title || "Recipe",
-      { sources: historySources, raw_texts: historyRawTexts }
+      synthOpts
     );
     const synth = phasedMain?.payload;
     let source_extractions: unknown =
@@ -456,6 +490,7 @@ export async function POST(req: NextRequest) {
       raw_texts: historyRawTexts.length ? historyRawTexts : [],
       needs_review: needsReview,
       source_extractions,
+      recipe_quality: dbPayload.recipe_quality,
     };
 
     const supabase = createServerClient();
@@ -483,6 +518,7 @@ export async function POST(req: NextRequest) {
         sources: recipeRow.sources,
         raw_texts: recipeRow.raw_texts,
         source_extractions: recipeRow.source_extractions,
+        recipe_quality: recipeRow.recipe_quality,
         needs_review: recipeRow.needs_review,
         needs_user_input: needsUserInput,
         updated_at: new Date().toISOString(),
