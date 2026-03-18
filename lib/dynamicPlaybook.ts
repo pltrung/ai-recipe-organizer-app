@@ -534,24 +534,59 @@ ${tipSample || "(none)"}`;
 }
 
 export function playbookForPhaseC(playbook: DynamicPlaybook): string {
-  return `DYNAMIC PLAYBOOK
-Family: ${playbook.dish_family} | Cuisine lens: ${playbook.cuisine}
-Signature ingredients (honor in core): ${playbook.signature_ingredients.join(", ") || "—"}
-Signature techniques: ${playbook.signature_techniques.join(", ") || "—"}
-Core roles for this dish type: ${playbook.core_roles.join(", ")}
-Expected flow (ingredients should support this): ${playbook.expected_flow.join(" → ")}`;
+  const flow = playbook.expected_flow.map((s, i) => `${i + 1}. ${s}`).join("\n");
+  return `DYNAMIC PLAYBOOK (judge ingredients against this — prefer playbook + essentials over noisy sources)
+Family: ${playbook.dish_family}
+Cuisine lens: ${playbook.cuisine}
+IDENTITY DRIVERS — signature ingredients (must be core unless truly substitutable with note): ${playbook.signature_ingredients.join("; ") || "—"}
+Signature techniques: ${playbook.signature_techniques.join("; ") || "—"}
+Core roles expected: ${playbook.core_roles.join("; ") || "—"}
+EXPECTED FLOW (core list must enable this flow):
+${flow}
+Failure modes to avoid under-supplying: ${playbook.failure_points.join("; ") || "—"}
+Serving: ${playbook.serving_style.join("; ") || "—"}
+Timing context: ${playbook.timing_expectations.join("; ") || "—"}`;
 }
 
 export function playbookForPhaseD(playbook: DynamicPlaybook): string {
-  return `DYNAMIC PLAYBOOK — follow this flow and tone
+  const flow = playbook.expected_flow.map((s, i) => `${i + 1}. ${s}`).join("\n");
+  return `DYNAMIC PLAYBOOK — HARD ORDER: each step maps to these beats in sequence (combine beats if needed; never skip a beat).
 
-EXPECTED FLOW (steps should map to these beats in order):
-${playbook.expected_flow.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+EXPECTED_FLOW:
+${flow}
 
-KEY TECHNIQUES: ${playbook.key_techniques.join(", ")}
-LIKELY TOOLS: ${playbook.likely_tools.join(", ")}
+FAMILY: ${playbook.dish_family} | CUISINE: ${playbook.cuisine}
+KEY_TECHNIQUES: ${playbook.key_techniques.join(", ")}
+TOOLS: ${playbook.likely_tools.join(", ")}
 TIMING: ${playbook.timing_expectations.join("; ")}
-FAILURE POINTS (address in warnings or avoid_mistakes): ${playbook.failure_points.join("; ")}
-SERVING: ${playbook.serving_style.join("; ")}
-ANCHORS: ${playbook.signature_ingredients.join(", ")} | ${playbook.signature_techniques.join(", ")}`;
+FAILURE_POINTS (weave into avoid_mistakes or sparse step warnings): ${playbook.failure_points.join("; ")}
+SERVING_STYLE: ${playbook.serving_style.join("; ")}
+ANCHORS (honor in titles/instructions): ${playbook.signature_ingredients.join(", ")} | ${playbook.signature_techniques.join(", ")}`;
+}
+
+/** Mandatory beats for validation / injection hints */
+export function familyMandatoryHints(family: string): string[] {
+  const f = family.toLowerCase();
+  if (f === "pizza_flatbread")
+    return ["dough_rest_or_proof", "preheat_oven", "shape", "high_heat_bake"];
+  if (f === "baked_cake") return ["preheat_oven", "bake"];
+  if (f === "layered_chilled_dessert")
+    return ["chill_or_set", "layer_or_assemble"];
+  if (f === "noodle_soup" || f === "rice_plate")
+    return ["bowl_assembly_or_serve"];
+  if (f === "pasta") return ["sauce_or_finish", "serve"];
+  return [];
+}
+
+export function familyMandatoryHintsDetailed(family: string): string {
+  const f = family.toLowerCase();
+  if (f === "baked_cake")
+    return "Include: preheat oven to recipe temperature before baking; bake until doneness; cool if needed.";
+  if (f === "pizza_flatbread")
+    return "Include: dough rest or proof if time allows; preheat oven/stone very hot; shape, top, short high-heat bake.";
+  if (f === "layered_chilled_dessert")
+    return "Include: chill or refrigerate until set between/final layers; clear layer sequence.";
+  if (f === "noodle_soup")
+    return "Include: broth depth, noodle cook, bowl assembly (noodles + toppings + hot broth), garnish at service.";
+  return "Follow EXPECTED_FLOW beats; no skipped stages.";
 }

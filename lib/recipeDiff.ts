@@ -266,6 +266,46 @@ export function diffRecipes(prev: Recipe, next: Recipe): RecipeDiffStructured {
   };
 }
 
+/** Drop trivial step edits for AI diff / summaries (high Jaccard = wording-only). */
+export function materialRecipeDiffStructured(
+  structured: RecipeDiffStructured
+): RecipeDiffStructured {
+  const meaningfulMod = structured.steps_modified.filter((m) => {
+    const j = tokenJaccardPub(m.before, m.after);
+    return j < 0.82 && m.before.slice(0, 80) !== m.after.slice(0, 80);
+  });
+  const meaningfulNew = structured.steps_new.filter(
+    (s) => s.length > 40 || /preheat|chill|bake|simmer|broth|dough/i.test(s)
+  );
+  const meaningfulRemoved = structured.steps_removed.filter((s) => s.length > 40);
+
+  return {
+    ...structured,
+    steps_modified: meaningfulMod,
+    steps_new: meaningfulNew,
+    steps_removed: meaningfulRemoved,
+  };
+}
+
+function tokenJaccardPub(a: string, b: string): number {
+  const words = (t: string) =>
+    new Set(
+      t
+        .toLowerCase()
+        .split(/\W+/)
+        .filter((w) => w.length > 2)
+    );
+  const ta = words(a);
+  const tb = words(b);
+  if (ta.size === 0 && tb.size === 0) return 1;
+  let inter = 0;
+  ta.forEach((w) => {
+    if (tb.has(w)) inter += 1;
+  });
+  const u = ta.size + tb.size - inter;
+  return u ? inter / u : 0;
+}
+
 /** Compact recipe for AI comparison (truncated). */
 export function recipeToDiffSummaryText(r: Recipe, maxStepChars = 600): string {
   const core = (r.ingredients?.core ?? []).map(displayIng).join("; ");

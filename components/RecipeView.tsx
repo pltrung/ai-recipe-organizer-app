@@ -146,6 +146,35 @@ export function RecipeView({
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [rationaleOpen, setRationaleOpen] = useState(false);
+
+  const meaningfulSubstitutions = useMemo(() => {
+    if (!Array.isArray(substitutions) || substitutions.length === 0) return [];
+    return substitutions.filter((sub) => {
+      const o = sub && typeof sub === "object" ? sub : null;
+      const main = String(o?.ingredient ?? o?.original ?? "").trim();
+      if (!main) return false;
+      const alts =
+        o && Array.isArray(o.options) && o.options.length
+          ? o.options
+          : o && Array.isArray(o.alternatives)
+            ? o.alternatives
+            : [];
+      const note = o?.note?.trim();
+      return alts.length > 0 || Boolean(note);
+    });
+  }, [substitutions]);
+
+  const showQualityPills =
+    (quality?.dish_taxonomy && quality.dish_taxonomy !== "other") ||
+    Boolean(quality?.cuisine?.trim()) ||
+    (quality?.synthesis_style && quality.synthesis_style !== "authentic");
+
+  const hasQualityBody =
+    (quality?.critical_tips?.length ?? 0) > 0 ||
+    (quality?.avoid_mistakes?.length ?? 0) > 0 ||
+    (quality?.variant_notes?.length ?? 0) > 0 ||
+    (quality?.core_rationale?.length ?? 0) > 0;
 
   useEffect(() => {
     setTargetServings(baseServings);
@@ -253,12 +282,19 @@ export function RecipeView({
             {nSources} source{nSources === 1 ? "" : "s"}
           </span>
         </div>
-        {quality?.dish_taxonomy && quality.dish_taxonomy !== "other" ? (
+        {showQualityPills ? (
           <div className="flex flex-wrap gap-2 pt-1">
-            <span className="rounded-full bg-neutral-100 px-3 py-1 text-xs font-medium text-neutral-700">
-              {formatTaxonomyLabel(quality.dish_taxonomy)}
-            </span>
-            {quality.synthesis_style &&
+            {quality?.dish_taxonomy && quality.dish_taxonomy !== "other" ? (
+              <span className="rounded-full bg-neutral-100 px-3 py-1 text-xs font-medium text-neutral-700">
+                {formatTaxonomyLabel(quality.dish_taxonomy)}
+              </span>
+            ) : null}
+            {quality?.cuisine?.trim() ? (
+              <span className="rounded-full bg-neutral-100/80 px-3 py-1 text-xs font-medium text-neutral-600">
+                {quality.cuisine.trim()}
+              </span>
+            ) : null}
+            {quality?.synthesis_style &&
             quality.synthesis_style !== "authentic" ? (
               <span className="rounded-full border border-neutral-200 px-3 py-1 text-xs text-neutral-600">
                 Style:{" "}
@@ -273,7 +309,9 @@ export function RecipeView({
         ) : null}
       </header>
 
-      {(quality?.critical_tips?.length || quality?.avoid_mistakes?.length) ? (
+      {hasQualityBody ? (
+        <div className="space-y-4">
+          {(quality?.critical_tips?.length || quality?.avoid_mistakes?.length) ? (
         <div className="grid gap-4 sm:grid-cols-2">
           {quality.critical_tips && quality.critical_tips.length > 0 ? (
             <section className="rounded-xl border border-blue-200/80 bg-blue-50/60 px-4 py-4 shadow-sm">
@@ -306,17 +344,46 @@ export function RecipeView({
         </div>
       ) : null}
 
-      {quality?.variant_notes && quality.variant_notes.length > 0 ? (
-        <section className="rounded-xl border border-violet-200/70 bg-violet-50/40 px-4 py-4">
-          <h2 className="text-xs font-bold uppercase tracking-wide text-violet-900">
-            Variants from your sources
-          </h2>
-          <ul className="mt-2 space-y-2 text-sm text-violet-950">
-            {quality.variant_notes.map((t, i) => (
-              <li key={i}>{t}</li>
-            ))}
-          </ul>
-        </section>
+          {quality?.variant_notes && quality.variant_notes.length > 0 ? (
+            <section className="rounded-xl border border-violet-200/70 bg-violet-50/40 px-4 py-4">
+              <h2 className="text-xs font-bold uppercase tracking-wide text-violet-900">
+                Variants
+              </h2>
+              <ul className="mt-2 space-y-2 text-sm text-violet-950">
+                {quality.variant_notes.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {quality?.core_rationale && quality.core_rationale.length > 0 ? (
+            <div className="rounded-lg border border-neutral-200/80 bg-neutral-50/50 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setRationaleOpen((v) => !v)}
+                className="flex w-full items-center justify-between text-left text-xs font-semibold uppercase tracking-wide text-neutral-700"
+              >
+                Why these essentials
+                <span className="text-neutral-400" aria-hidden>
+                  {rationaleOpen ? "▾" : "▸"}
+                </span>
+              </button>
+              {rationaleOpen ? (
+                <ul className="mt-3 space-y-2 border-t border-neutral-200/60 pt-3 text-sm text-neutral-800">
+                  {quality.core_rationale.map((r, i) => (
+                    <li key={i}>
+                      <span className="font-medium text-neutral-900">
+                        {r.name}
+                      </span>
+                      : {r.why}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       {/* Servings */}
@@ -436,13 +503,13 @@ export function RecipeView({
         </div>
       ) : null}
 
-      {substitutions.length > 0 && (
+      {meaningfulSubstitutions.length > 0 && (
         <section className="rounded-xl border border-orange-100 bg-orange-50/50 px-5 py-5 shadow-sm">
           <h2 className="text-sm font-semibold uppercase tracking-wider text-orange-900">
             Substitutions
           </h2>
           <ul className="mt-4 space-y-4">
-            {substitutions.map((sub, i) => {
+            {meaningfulSubstitutions.map((sub, i) => {
               const o = typeof sub === "object" && sub ? sub : null;
               const main =
                 typeof sub === "string"
@@ -513,27 +580,35 @@ export function RecipeView({
                     <h3 className="text-base font-semibold text-neutral-900">
                       {step.title}
                     </h3>
-                    <div className="flex flex-wrap gap-3 text-xs text-neutral-500">
-                      {step.time && step.time !== "—" && step.time !== "As needed" ? (
-                        <span>⏱ {step.time}</span>
-                      ) : null}
-                      {step.tools && step.tools.length > 0 ? (
-                        <span>🛠 {step.tools.join(", ")}</span>
-                      ) : null}
-                    </div>
-                    <p className="text-[15px] leading-relaxed text-neutral-700">
+                    <p className="text-xs text-neutral-500">
+                      {[
+                        step.time &&
+                        step.time !== "—" &&
+                        step.time !== "As needed"
+                          ? `⏱ ${step.time}`
+                          : null,
+                        step.tools && step.tools.length > 0
+                          ? `🛠 ${step.tools.join(", ")}`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || null}
+                    </p>
+                    <p className="max-w-prose text-[15px] leading-relaxed text-neutral-800">
                       {step.instructions}
                     </p>
                     {step.warnings && step.warnings.length > 0 ? (
-                      <ul className="space-y-1 rounded-lg border border-amber-200/80 bg-amber-50/80 px-3 py-2 text-sm text-amber-950">
+                      <ul className="space-y-0.5 text-xs leading-snug text-amber-900/75">
                         {step.warnings.map((w, j) => (
-                          <li key={j}>⚠ {w}</li>
+                          <li key={j} className="border-l-2 border-amber-200/90 pl-2">
+                            {w}
+                          </li>
                         ))}
                       </ul>
                     ) : step.goal &&
                       step.goal.length > 5 &&
                       !step.goal.startsWith("Complete") ? (
-                      <p className="text-sm text-amber-900/90">{step.goal}</p>
+                      <p className="text-xs text-amber-900/70">{step.goal}</p>
                     ) : null}
                   </div>
                 </div>

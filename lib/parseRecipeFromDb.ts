@@ -237,10 +237,10 @@ function parseRecipeQuality(raw: unknown): RecipeQualityMeta | null {
         .filter(Boolean)
     : [];
   const critical_tips = Array.isArray(o.critical_tips)
-    ? o.critical_tips.map(String).filter(Boolean)
+    ? o.critical_tips.map(String).filter(Boolean).slice(0, 6)
     : [];
   const avoid_mistakes = Array.isArray(o.avoid_mistakes)
-    ? o.avoid_mistakes.map(String).filter(Boolean)
+    ? o.avoid_mistakes.map(String).filter(Boolean).slice(0, 5)
     : [];
   const ingredient_roles = Array.isArray(o.ingredient_roles)
     ? (o.ingredient_roles as unknown[])
@@ -253,10 +253,15 @@ function parseRecipeQuality(raw: unknown): RecipeQualityMeta | null {
         })
         .filter(Boolean)
     : [];
+  const cuisine =
+    typeof o.cuisine === "string" && o.cuisine.trim()
+      ? o.cuisine.trim()
+      : undefined;
   return {
     dish_taxonomy: String(o.dish_taxonomy ?? "other"),
+    cuisine,
     synthesis_style: String(o.synthesis_style ?? "authentic"),
-    variant_notes,
+    variant_notes: variant_notes.slice(0, 3),
     core_rationale: core_rationale as { name: string; why: string }[],
     critical_tips,
     avoid_mistakes,

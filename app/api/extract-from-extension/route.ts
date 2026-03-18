@@ -18,7 +18,10 @@ import {
   RAW_TEXT_JOINER,
   asStringArray,
 } from "@/lib/recipeSourceHistory";
-import { diffRecipes } from "@/lib/recipeDiff";
+import {
+  diffRecipes,
+  materialRecipeDiffStructured,
+} from "@/lib/recipeDiff";
 import {
   summarizeRecipeDiffWithAi,
   heuristicDiffSummary,
@@ -233,16 +236,18 @@ export async function POST(req: NextRequest) {
           recipe_quality: dbPayload.recipe_quality ?? null,
         };
         const structured = diffRecipes(previousRecipe, nextRecipe);
+        const materialStructured = materialRecipeDiffStructured(structured);
         const aiPart =
           (await summarizeRecipeDiffWithAi(
             previousRecipe,
             nextRecipe,
-            structured,
+            materialStructured,
             openaiKey
-          )) ?? heuristicDiffSummary(structured);
+          )) ?? heuristicDiffSummary(materialStructured);
         let key_improvements = [...aiPart.key_improvements];
         if (key_improvements.length === 0) {
-          key_improvements = heuristicDiffSummary(structured).key_improvements;
+          key_improvements =
+            heuristicDiffSummary(materialStructured).key_improvements;
         }
         key_improvements = key_improvements.slice(0, 5);
         const at = new Date().toISOString();
@@ -295,6 +300,10 @@ export async function POST(req: NextRequest) {
           console.error("extract-from-extension update:", upErr);
           return json({ error: "Failed to update recipe" }, { status: 500 });
         }
+
+        console.log(
+          `[extract-from-extension] merge_verify id=${recipeId} body+source_extractions+last_diff+updated_at ok`
+        );
 
         const { data: fresh } = await supabase
           .from("recipes")

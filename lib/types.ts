@@ -70,6 +70,8 @@ export type RecipeSubstitutionEntry = {
 /** Chef-quality metadata from phased synthesis */
 export type RecipeQualityMeta = {
   dish_taxonomy: string;
+  /** Cuisine label from dish profile (e.g. Vietnamese, Italian) */
+  cuisine?: string;
   synthesis_style: string;
   variant_notes: string[];
   core_rationale: { name: string; why: string }[];
