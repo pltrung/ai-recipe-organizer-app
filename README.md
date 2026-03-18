@@ -20,6 +20,9 @@ Save recipes from any platform (YouTube, TikTok, Instagram, blogs) by pasting li
 3. Run the SQL in `supabase/migrations/20240318000000_create_recipes.sql` in Supabase → SQL Editor
 4. `npm run dev` → [http://localhost:3000](http://localhost:3000)
 
+**Architecture & flows (classification, fetching per platform, merge, extension):**  
+→ **[docs/FLOW_AND_ARCHITECTURE.md](./docs/FLOW_AND_ARCHITECTURE.md)**
+
 ## App structure
 
 - **Landing** `/` – intro + Create Recipe / Dashboard
